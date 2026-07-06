@@ -1,0 +1,6 @@
+/gov-layer
+/server
+*.exe
+
+# Environment / secrets
+.env

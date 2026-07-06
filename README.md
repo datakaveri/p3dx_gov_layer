@@ -1,243 +1,131 @@
-# P3DX Governance Layer
+# P3DX Governance Layer (Go)
 
-A lightweight Node.js backend service for storing Output Owner form submissions in the P3DX system.
+A Go backend service for the P3DX system. It stores Output Owner and Data
+Provider form submissions, distributes federated-learning client configuration,
+and orchestrates FL sessions (provisioning + launching server/clients via the
+control-plane receivers).
 
-## Purpose
-
-The Governance Layer receives and stores Output Owner form submissions from the AAA backend. It provides a simple REST API for form submission and retrieval.
-
-## Features
-
-- **Form Storage**: Stores Output Owner form submissions in PostgreSQL database
-- **Persistent Storage**: Data persists across server restarts
-- **REST API**: Simple HTTP endpoints for form operations
-- **CORS Support**: Configurable CORS for frontend integration
-- **Error Handling**: Consistent error responses
+> This service was ported from the original Node.js implementation to Go. It is
+> a **drop-in replacement**: identical REST + gRPC endpoints, identical JSON
+> shapes/status codes, the same `.env`, and the same `p3dx_governance` PostgreSQL
+> database. No behaviour or usability changes — the FL flow works exactly as
+> before. The original Node sources are retained under `src/` for reference but
+> are no longer used at runtime.
 
 ## Architecture
 
 ```
-AAA Backend → POST /api/v1/form-submissions → Governance Layer (stores form)
-Frontend → GET /api/v1/form-submissions → Governance Layer (retrieves forms)
+AAA Backend / UI ──HTTP──> Governance Layer  (:8084 REST, :50052 gRPC)
+                                  │
+                                  ├── PostgreSQL  (p3dx_governance)
+                                  ├── Keycloak    (service-account token for receiver calls)
+                                  └── FL receivers (owner :8090 / providers :8080)
 ```
 
-## Setup
+The service exposes:
+1. **REST API** (port `8083`, set to `8084` in `.env`) for the frontend and AAA backend.
+2. **gRPC server** (port `50052`) for backend-to-backend communication (`GovernanceService`).
 
-### Prerequisites
+## Requirements
 
-- Node.js (v18 or higher)
-- npm
+- Go 1.22+
+- PostgreSQL (database `p3dx_governance`; auto-created on first run if missing)
+- (optional) Keycloak, for service-account auth on calls to the FL receivers
 
-### Installation
+## Configuration
 
-1. Navigate to the project directory:
+Copy `.env.example` to `.env` and adjust. The service loads `.env` with
+**override** semantics (its own values win over any inherited shell variables),
+so generic vars like `DB_USER`/`DB_PASSWORD` exported for a sibling service can't
+hijack this one's database connection.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | REST API port | `8083` |
+| `GRPC_PORT` | gRPC port | `50052` |
+| `NODE_ENV` | Environment label | `development` |
+| `CORS_ORIGINS` | Comma-separated allowed origins (informational) | — |
+| `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` | PostgreSQL connection | `localhost`/`5432`/`p3dx_governance`/`postgres`/`postgres` |
+| `KEYCLOAK_BASE_URL`/`KEYCLOAK_REALM`/`KEYCLOAK_CLIENT_ID`/`KEYCLOAK_CLIENT_SECRET` | Service-account auth for receiver calls | — |
+| `PUSH_AUTH_TOKEN` | Legacy `X-Auth-Token` fallback when Keycloak is unset | — |
+| `OWNER_SELF_IPS` | Extra IPs treated as "this host" (rewritten to loopback) | — |
+
+FL-orchestration paths/timeouts (`DISTRIBUTE_SCRIPT`, `PROVISION_TIMEOUT_MS`,
+`PUSH_TIMEOUT_MS`, `FL_SESSION_DELAY_MS`, `CLIENT_CONFIG_TEMPLATE`, …) keep the
+same names and defaults as before and can be overridden via the environment.
+
+## Running
+
 ```bash
-cd c:\Users\Saravan_04\OneDrive\Desktop\p3dx_gov_layer
+# from this directory (p3dx_gov_layer/)
+go run ./cmd/server
+PORT=8090 ./output_owner_env_receiver.py
 ```
+  
+Or build a binary:
 
-2. Install dependencies:
 ```bash
-npm install
+go build -o gov-layer ./cmd/server
+./gov-layer
 ```
 
-3. Ensure PostgreSQL is running:
-```bash
-# On Windows with PostgreSQL installed
-# Start PostgreSQL service
-
-# On Linux/WSL
-sudo service postgresql start
-```
-
-4. Create database:
-```bash
-# Using psql
-psql -U postgres
-CREATE DATABASE p3dx_governance;
-\q
-```
-
-5. Create environment file:
-```bash
-cp .env.example .env
-```
-
-6. Configure `.env`:
-```env
-PORT=8083
-CORS_ORIGINS=http://localhost:5173,http://localhost:3000
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=p3dx_governance
-DB_USER=postgres
-DB_PASSWORD=your_password
-```
-
-### Running the Server
-
-**Development mode (with auto-reload):**
-```bash
-npm run dev
-```
-
-**Production mode:**
-```bash
-npm start
-```
-
-The server will start on port 8083 by default.
+The repo's `../start.sh` launches the whole P3DX stack and starts this service
+with `go run ./cmd/server`.
 
 ## API Endpoints
 
-### POST /api/v1/form-submissions
+All endpoints are mounted under **both** `/api/v1` and `/governance`.
 
-Store an Output Owner form submission.
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/form-submissions` | Store an Output Owner form (upsert on `form_id`) |
+| `GET` | `/form-submissions` | List all submissions |
+| `GET` | `/form-submissions/export` | Download all submissions as JSON |
+| `GET` | `/form-submissions/:id` | Fetch one submission |
+| `DELETE` | `/form-submissions/:id` | Delete one submission |
+| `GET` | `/form-submissions/:id/report` | Download the combined FL session report (JSON) |
+| `GET` | `/data-providers` | Mock provider list |
+| `POST` | `/send-provider-message` | Store a provider notification message |
+| `POST` | `/data-provider-forms` | Store a Data Provider form |
+| `GET` | `/data-provider-forms` | List Data Provider forms |
+| `POST` | `/notifications` | Create notifications for recipients |
+| `GET` | `/notifications/:username` | Fetch a user's notifications |
+| `GET` | `/notifications/by-sender/:username` | Notifications a user sent (owner's participation-responses view) |
+| `PATCH` | `/notifications/:id/read` | Mark a notification read |
+| `POST` | `/notifications/:id/respond` | Provider answers a participation request (`accepted`/`declined` + reason) |
+| `POST` | `/distribute-config` | scp client config to providers (via `send_output_owner_config.sh`) |
+| `POST` | `/provision-env` | Provision a venv on each selected provider |
+| `POST` | `/push-config` | HTTP-push rendered `client_config.yaml` to providers |
+| `POST` | `/start-fl-session` | Bring up owner + providers and start the FL round |
+| `GET` | `/client-config/by-submission/:id` | Owner-side rendered config download |
+| `GET` | `/client-config/:username` | Provider-side rendered config pull |
 
-**Request Body:**
-```json
-{
-  "payload": {
-    "form_id": "outputform-001",
-    "requested_by": "admin-uuid-001",
-    "output_owner_id": "outputowner1",
-    "num_server_rounds": 10,
-    "fraction_evaluate": 0.5,
-    "local_epochs": 1,
-    "learning_rate": 0.01,
-    "batch_size": 32,
-    "model": "AlexNet",
-    "framework": "flwrlabs",
-    "components": {}
-  }
-}
-```
-
-**Response:**
-```json
-{
-  "status": "SUCCESS",
-  "message": "Form submission stored successfully",
-  "submission_id": "gov-1713761234567-abc123def"
-}
-```
-
-### GET /api/v1/form-submissions
-
-Retrieve all stored form submissions.
-
-**Response:**
-```json
-{
-  "status": "SUCCESS",
-  "count": 2,
-  "submissions": [
-    {
-      "form_id": "outputform-001",
-      "output_owner_id": "outputowner1",
-      "submission_id": "gov-1713761234567-abc123def",
-      "filled_at": "2024-04-22T10:30:00.000Z"
-    }
-  ]
-}
-```
-
-### GET /api/v1/form-submissions/:id
-
-Retrieve a specific form submission by ID.
-
-### DELETE /api/v1/form-submissions/:id
-
-Delete a specific form submission by ID.
-
-## Data Storage
-
-Form submissions are stored in a **PostgreSQL database**. Data persists across server restarts. The database table is automatically created on first startup.
-
-**Database Schema:**
-```sql
-CREATE TABLE form_submissions (
-  id TEXT PRIMARY KEY,
-  form_id TEXT NOT NULL,
-  requested_by TEXT NOT NULL,
-  output_owner_id TEXT NOT NULL,
-  num_server_rounds INTEGER,
-  fraction_evaluate REAL,
-  local_epochs INTEGER,
-  learning_rate REAL,
-  batch_size INTEGER,
-  model TEXT,
-  framework TEXT,
-  components JSONB,
-  filled BOOLEAN DEFAULT true,
-  requested_at TIMESTAMP,
-  filled_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-```
-
-## Integration with AAA Backend
-
-The AAA backend sends Output Owner form data to this service:
-
-```javascript
-// In AAA backend (p3dx.routes.js)
-const governanceRes = await fetch('http://localhost:8083/api/v1/form-submissions', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
-  },
-  body: JSON.stringify({ payload: outputOwnerPayload })
-});
-```
+The gRPC `GovernanceService` provides `SubmitForm`, `GetForm`, `GetAllForms`,
+`DeleteForm` (see `protos/governance.proto`).
 
 ## Project Structure
 
 ```
 p3dx_gov_layer/
-├── src/
-│   ├── app.js              # Express app configuration
-│   ├── server.js           # Server entry point
-│   ├── routes/
-│   │   └── governance.routes.js  # API endpoints
-│   └── middlewares/
-│       └── error.middleware.js   # Error handling
-├── package.json            # Dependencies
-├── .env.example            # Environment variables template
-└── README.md               # This file
+├── cmd/server/            # entry point (REST + gRPC, graceful shutdown)
+├── internal/
+│   ├── config/            # env loading + all route constants
+│   ├── db/                # pgx data layer (schema, migrations, queries)
+│   ├── keycloak/          # service-account token provider
+│   ├── httpapi/           # REST handlers, CORS, FL orchestration, YAML render
+│   ├── grpcsrv/           # gRPC GovernanceService
+│   └── govpb/             # generated protobuf/gRPC bindings
+├── protos/                # .proto definitions
+├── go.mod / go.sum
+├── .env.example
+└── src/                   # original Node.js implementation (reference only)
 ```
 
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| PORT | Server port | 8083 |
-| NODE_ENV | Environment (development/production) | development |
-| CORS_ORIGINS | Comma-separated allowed origins | (none) |
-
-## Testing
-
-Test the API using curl:
+## Regenerating gRPC bindings
 
 ```bash
-# Store a form submission
-curl -X POST http://localhost:8083/api/v1/form-submissions \
-  -H "Content-Type: application/json" \
-  -d '{"payload":{"form_id":"test-001","output_owner_id":"test-user"}}'
-
-# Retrieve all submissions
-curl http://localhost:8083/api/v1/form-submissions
+protoc -I protos \
+  --go_out=internal/govpb --go_opt=paths=source_relative,Mgovernance.proto=github.com/s4r4v4n04/p3dx_gov_layer/internal/govpb \
+  --go-grpc_out=internal/govpb --go-grpc_opt=paths=source_relative,Mgovernance.proto=github.com/s4r4v4n04/p3dx_gov_layer/internal/govpb \
+  governance.proto
 ```
-
-## Troubleshooting
-
-**Port already in use:**
-- Change the PORT in `.env` file
-- Or stop the process using port 8083
-
-**CORS errors:**
-- Add your frontend URL to CORS_ORIGINS in `.env`
-
-**Data lost on restart:**
-- This is expected behavior (in-memory storage)
-- For persistence, integrate a database
