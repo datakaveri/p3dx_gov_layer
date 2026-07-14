@@ -2,17 +2,13 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
-const providerFormColumns = `id, form_id, data_owner_id, ram, memory_mb,
-	data_size_bytes, data_resource_id, ip_address, port, filled, filled_at,
-	submitted_by, created_at, ram_usage`
-
-// DataProviderForm is one row of data_provider_forms.
+// DataProviderForm is one data-provider form. It is stored in APD as this exact
+// JSON document and reconstructed here on read.
 type DataProviderForm struct {
 	ID            string     `db:"id" json:"id"`
 	FormID        *string    `db:"form_id" json:"form_id"`
@@ -64,58 +60,55 @@ type ProviderFormInput struct {
 	SubmittedBy   *string   `json:"submitted_by"`
 }
 
-// StoreDataProviderForm inserts a data-provider form and returns its id.
-// Mirrors storeDataProviderForm().
+// StoreDataProviderForm stores a data-provider form in APD and returns its id.
+// The document and coercions match what the SQL store produced.
 func (d *DB) StoreDataProviderForm(ctx context.Context, in *ProviderFormInput) (string, error) {
 	id := newID("dpf", 9)
 	filledAt := parseTimeOr(in.FilledAt, time.Now().UTC())
-	_, err := d.Pool.Exec(ctx, `INSERT INTO data_provider_forms
-		(id, form_id, data_owner_id, ram, memory_mb, data_size_bytes, data_resource_id, ip_address, port, filled, filled_at, submitted_by, ram_usage)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		id,
-		truthyStr(in.FormID),
-		truthyStr(in.DataOwnerID),
-		truthyInt(in.RAM.ptr()),
-		truthyInt(in.MemoryMB.ptr()),
-		truthyBigInt(in.DataSizeBytes.ptr()),
-		truthyStr(in.DataResource),
-		truthyStr(in.IPAddress),
-		truthyInt(in.Port.ptr()),
-		true,
-		filledAt,
-		truthyStr(in.SubmittedBy),
-		truthyInt(in.RAMUsage.ptr()),
-	)
+	filled := true
+
+	form := DataProviderForm{
+		ID:            id,
+		FormID:        strOrNil(in.FormID),
+		DataOwnerID:   strOrNil(in.DataOwnerID),
+		RAM:           flexInt32(in.RAM),
+		MemoryMB:      flexInt32(in.MemoryMB),
+		DataSizeBytes: flexBigInt(in.DataSizeBytes),
+		DataResource:  strOrNil(in.DataResource),
+		IPAddress:     strOrNil(in.IPAddress),
+		Port:          flexInt32(in.Port),
+		Filled:        &filled,
+		FilledAt:      &filledAt,
+		SubmittedBy:   strOrNil(in.SubmittedBy),
+		RAMUsage:      flexInt32(in.RAMUsage),
+	}
+
+	doc, err := json.Marshal(form)
 	if err != nil {
 		return "", err
 	}
-	log.Println("[DATABASE] Data provider form stored:", id)
-	return id, nil
+	var formID, dataOwner string
+	if form.FormID != nil {
+		formID = *form.FormID
+	}
+	if form.DataOwnerID != nil {
+		dataOwner = *form.DataOwnerID
+	}
+	storedID, err := d.apd.insertProviderForm(ctx, id, formID, dataOwner, doc)
+	if err != nil {
+		return "", err
+	}
+	log.Println("[DATABASE] Data provider form stored in APD:", storedID)
+	return storedID, nil
 }
 
-// GetAllDataProviderForms returns every data-provider form, newest-first.
+// GetAllDataProviderForms returns every data-provider form, newest-first (from APD).
 func (d *DB) GetAllDataProviderForms(ctx context.Context) ([]DataProviderForm, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT `+providerFormColumns+` FROM data_provider_forms ORDER BY created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[DataProviderForm])
+	return d.apd.listProviderForms(ctx)
 }
 
 // GetDataProviderFormsByUsernames returns the latest form per data_owner_id for
-// the given usernames (DISTINCT ON ... ORDER BY created_at DESC). Empty input
-// yields an empty slice. Mirrors getDataProviderFormsByUsernames().
+// the given usernames (from APD). Empty input yields an empty slice.
 func (d *DB) GetDataProviderFormsByUsernames(ctx context.Context, usernames []string) ([]DataProviderForm, error) {
-	if len(usernames) == 0 {
-		return []DataProviderForm{}, nil
-	}
-	// usernames is a Go []string -> a single $1 text[] parameter via ANY().
-	rows, err := d.Pool.Query(ctx, `SELECT DISTINCT ON (data_owner_id) `+providerFormColumns+`
-		FROM data_provider_forms
-		WHERE data_owner_id = ANY($1)
-		ORDER BY data_owner_id, created_at DESC`, usernames)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[DataProviderForm])
+	return d.apd.providerFormsByUsernames(ctx, usernames)
 }

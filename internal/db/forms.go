@@ -5,20 +5,11 @@ import (
 	"encoding/json"
 	"log"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
-// form_submissions column list (table order + ALTER-added columns), shared by
-// every SELECT so pgx.RowToStructByName maps cleanly onto FormSubmission.
-const formColumns = `id, form_id, requested_by, output_owner_id,
-	num_server_rounds, fraction_evaluate, local_epochs, learning_rate, batch_size,
-	model, framework, components, filled, requested_at, filled_at, created_at,
-	selected_providers, ip_address, port, ram_usage`
-
-// FormSubmission is one row of form_submissions. JSON tags reproduce the shape
-// node-postgres returned to clients (SELECT *); jsonb columns are passed through
-// verbatim and nullable scalars serialize as null.
+// FormSubmission is one output-owner form. JSON tags reproduce the shape the
+// service has always returned to clients; the form is stored in APD as this exact
+// JSON document and reconstructed here on read.
 type FormSubmission struct {
 	ID                string          `db:"id" json:"id"`
 	FormID            string          `db:"form_id" json:"form_id"`
@@ -44,7 +35,7 @@ type FormSubmission struct {
 
 // FormInput is the inbound payload for storing an output-owner form (the REST
 // `payload` object or the gRPC FormSubmission mapped to it). Optional numerics
-// are pointers so "absent" and "present" are distinguishable before applying the
+// are FlexFloat so "absent" and "present" are distinguishable before applying the
 // `value || null` coercion.
 type FormInput struct {
 	FormID            string          `json:"form_id"`
@@ -94,153 +85,107 @@ func (f *FormSubmission) IP() string {
 	return *f.IPAddress
 }
 
-// StoreFormSubmission upserts on form_id: an existing form_id is UPDATEd in place
-// (no duplicate, same id) and a new one is INSERTed with a freshly minted id.
-// Returns the submission id. Mirrors storeFormSubmission().
-func (d *DB) StoreFormSubmission(ctx context.Context, in *FormInput) (string, error) {
-	filledAt := time.Now().UTC()
+// --- FlexFloat -> typed pointer, applying the `value || null` coercion (0/absent
+// => nil), matching the SQL-side truthy* helpers the store previously used. ---
 
-	var existingID string
-	err := d.Pool.QueryRow(ctx, `SELECT id FROM form_submissions WHERE form_id = $1`, in.FormID).Scan(&existingID)
-	switch err {
-	case nil:
-		// UPDATE existing record (no duplicate).
-		_, uerr := d.Pool.Exec(ctx, `UPDATE form_submissions SET
-				requested_by = $2,
-				output_owner_id = $3,
-				num_server_rounds = $4,
-				fraction_evaluate = $5,
-				local_epochs = $6,
-				learning_rate = $7,
-				batch_size = $8,
-				model = $9,
-				framework = $10,
-				components = $11,
-				filled = true,
-				filled_at = $12,
-				selected_providers = $13,
-				ip_address = $14,
-				port = $15,
-				ram_usage = $16
-			WHERE form_id = $1`,
-			in.FormID,
-			in.RequestedBy,
-			in.OutputOwnerID,
-			truthyInt(in.NumServerRounds.ptr()),
-			truthyFloat(in.FractionEvaluate.ptr()),
-			truthyInt(in.LocalEpochs.ptr()),
-			truthyFloat(in.LearningRate.ptr()),
-			truthyInt(in.BatchSize.ptr()),
-			truthyStr(in.Model),
-			truthyStr(in.Framework),
-			jsonbOr(in.Components, "{}"),
-			filledAt,
-			jsonbOr(in.SelectedProviders, "[]"),
-			truthyStr(in.IPAddress),
-			truthyInt(in.Port.ptr()),
-			truthyInt(in.RAMUsage.ptr()),
-		)
-		if uerr != nil {
-			return "", uerr
-		}
-		log.Println("[DATABASE] Form submission UPDATED (no duplicate):", existingID)
-		return existingID, nil
-	case pgx.ErrNoRows:
-		// INSERT new record.
-		submissionID := newID("gov", 9)
-		requestedAt := parseTimeOr(in.RequestedAt, filledAt)
-		_, ierr := d.Pool.Exec(ctx, `INSERT INTO form_submissions (
-				id, form_id, requested_by, output_owner_id,
-				num_server_rounds, fraction_evaluate, local_epochs,
-				learning_rate, batch_size, model, framework,
-				components, filled, requested_at, filled_at, selected_providers,
-				ip_address, port, ram_usage
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
-			submissionID,
-			in.FormID,
-			in.RequestedBy,
-			in.OutputOwnerID,
-			truthyInt(in.NumServerRounds.ptr()),
-			truthyFloat(in.FractionEvaluate.ptr()),
-			truthyInt(in.LocalEpochs.ptr()),
-			truthyFloat(in.LearningRate.ptr()),
-			truthyInt(in.BatchSize.ptr()),
-			truthyStr(in.Model),
-			truthyStr(in.Framework),
-			jsonbOr(in.Components, "{}"),
-			true,
-			requestedAt,
-			filledAt,
-			jsonbOr(in.SelectedProviders, "[]"),
-			truthyStr(in.IPAddress),
-			truthyInt(in.Port.ptr()),
-			truthyInt(in.RAMUsage.ptr()),
-		)
-		if ierr != nil {
-			return "", ierr
-		}
-		log.Println("[DATABASE] Form submission INSERTED:", submissionID)
-		return submissionID, nil
-	default:
+func flexInt32(f FlexFloat) *int32 {
+	if p := f.ptr(); p != nil && *p != 0 {
+		v := int32(*p)
+		return &v
+	}
+	return nil
+}
+
+func flexReal(f FlexFloat) *Real {
+	if p := f.ptr(); p != nil && *p != 0 {
+		v := Real(*p)
+		return &v
+	}
+	return nil
+}
+
+func flexBigInt(f FlexFloat) *BigInt {
+	if p := f.ptr(); p != nil && *p != 0 {
+		v := BigInt(int64(*p))
+		return &v
+	}
+	return nil
+}
+
+// strOrNil returns p when it points to a non-empty string, else nil (JS `value || null`).
+func strOrNil(p *string) *string {
+	if p != nil && *p != "" {
+		return p
+	}
+	return nil
+}
+
+// StoreFormSubmission upserts an output-owner form in APD (keyed on form_id: an
+// existing form_id is updated in place, a new one gets a freshly minted id).
+// Returns the submission id. The form document and the coercions match what the
+// SQL store produced.
+func (d *DB) StoreFormSubmission(ctx context.Context, in *FormInput) (string, error) {
+	now := time.Now().UTC()
+	requestedAt := parseTimeOr(in.RequestedAt, now)
+	filled := true
+	selectedProviders := json.RawMessage(jsonbOr(in.SelectedProviders, "[]"))
+	ip := strOrNil(in.IPAddress)
+
+	candidateID := newID("gov", 9)
+	sub := FormSubmission{
+		ID:                candidateID,
+		FormID:            in.FormID,
+		RequestedBy:       in.RequestedBy,
+		OutputOwnerID:     in.OutputOwnerID,
+		NumServerRounds:   flexInt32(in.NumServerRounds),
+		FractionEvaluate:  flexReal(in.FractionEvaluate),
+		LocalEpochs:       flexInt32(in.LocalEpochs),
+		LearningRate:      flexReal(in.LearningRate),
+		BatchSize:         flexInt32(in.BatchSize),
+		Model:             strOrNil(in.Model),
+		Framework:         strOrNil(in.Framework),
+		Components:        json.RawMessage(jsonbOr(in.Components, "{}")),
+		Filled:            &filled,
+		RequestedAt:       &requestedAt,
+		FilledAt:          &now,
+		SelectedProviders: selectedProviders,
+		IPAddress:         ip,
+		Port:              flexInt32(in.Port),
+		RAMUsage:          flexInt32(in.RAMUsage),
+	}
+
+	doc, err := json.Marshal(sub)
+	if err != nil {
 		return "", err
 	}
+	id, err := d.apd.upsertSubmission(ctx, candidateID, in.FormID, in.OutputOwnerID, ip != nil, selectedProviders, doc)
+	if err != nil {
+		return "", err
+	}
+	log.Println("[DATABASE] Form submission stored in APD:", id)
+	return id, nil
 }
 
-// GetAllFormSubmissions returns every form ordered newest-first.
+// GetAllFormSubmissions returns every form ordered newest-first (from APD).
 func (d *DB) GetAllFormSubmissions(ctx context.Context) ([]FormSubmission, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT `+formColumns+` FROM form_submissions ORDER BY created_at DESC`)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[FormSubmission])
+	return d.apd.listSubmissions(ctx)
 }
 
-// GetFormSubmissionByID returns one form or (nil, nil) when not found.
+// GetFormSubmissionByID returns one form or (nil, nil) when not found (from APD).
 func (d *DB) GetFormSubmissionByID(ctx context.Context, id string) (*FormSubmission, error) {
-	rows, err := d.Pool.Query(ctx, `SELECT `+formColumns+` FROM form_submissions WHERE id = $1`, id)
-	if err != nil {
-		return nil, err
-	}
-	sub, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[FormSubmission])
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &sub, nil
+	return d.apd.getSubmission(ctx, id)
 }
 
-// DeleteFormSubmission deletes by id and reports whether a row was removed.
+// DeleteFormSubmission deletes by id and reports whether a row was removed (in APD).
 func (d *DB) DeleteFormSubmission(ctx context.Context, id string) (bool, error) {
-	tag, err := d.Pool.Exec(ctx, `DELETE FROM form_submissions WHERE id = $1`, id)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
+	return d.apd.deleteSubmission(ctx, id)
 }
 
 // GetLatestSessionForProvider finds the most recent submission that has an owner
-// ip_address set and lists the given provider in selected_providers (JSONB
-// containment), or (nil, nil) if none. Mirrors getLatestSessionForProvider().
+// ip_address set and lists the given provider in selected_providers, or (nil, nil)
+// if none (from APD).
 func (d *DB) GetLatestSessionForProvider(ctx context.Context, username string) (*FormSubmission, error) {
-	containment, _ := json.Marshal([]map[string]string{{"username": username}})
-	rows, err := d.Pool.Query(ctx, `SELECT `+formColumns+` FROM form_submissions
-		WHERE COALESCE(ip_address,'') <> ''
-		  AND selected_providers @> $1::jsonb
-		ORDER BY created_at DESC
-		LIMIT 1`, string(containment))
-	if err != nil {
-		return nil, err
-	}
-	sub, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[FormSubmission])
-	if err == pgx.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &sub, nil
+	return d.apd.latestSubmissionForProvider(ctx, username)
 }
 
 // parseTimeOr parses an optional RFC3339 timestamp string, falling back to def.

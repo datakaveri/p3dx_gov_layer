@@ -77,6 +77,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Patch("/notifications/{key}/read", s.patchNotificationRead)
 	r.Post("/notifications/{key}/respond", s.respondToNotification)
 
+	r.Post("/contracts", s.postContract)
+	r.Get("/contracts/{sessionId}", s.getContract)
+
+	r.Get("/final-models", s.getFinalModels)
+	r.Get("/final-model/download", s.getFinalModelDownload)
+	r.Get("/final-model/summary", s.getFinalModelSummary)
+
 	r.Post("/distribute-config", s.distributeConfig)
 	r.Post("/provision-env", s.provisionEnv)
 	r.Post("/push-config", s.pushConfig)

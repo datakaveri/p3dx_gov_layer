@@ -15,9 +15,12 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 )
 
-// DB wraps the connection pool to the target (p3dx_governance) database.
+// DB wraps the connection pool to the target (p3dx_governance) database and the
+// APD client. The FL forms (output-owner submissions + data-provider forms) live
+// in APD now, so the form methods go through apd rather than Pool.
 type DB struct {
 	Pool *pgxpool.Pool
+	apd  *apdClient
 }
 
 // dsn builds a libpq key/value DSN for the given database name. SSL is disabled
@@ -80,7 +83,7 @@ func Initialize(ctx context.Context, cfg *config.Config) (*DB, error) {
 	}
 	log.Printf("[DATABASE] Connected to database '%s'", dbName)
 
-	d := &DB{Pool: pool}
+	d := &DB{Pool: pool, apd: newAPDClient(cfg.APDURL)}
 	if err := d.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -95,48 +98,10 @@ func (d *DB) Close() { d.Pool.Close() }
 // statements are idempotent (IF NOT EXISTS), matching the Node startup path.
 func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS form_submissions (
-			id TEXT PRIMARY KEY,
-			form_id TEXT UNIQUE NOT NULL,
-			requested_by TEXT NOT NULL,
-			output_owner_id TEXT NOT NULL,
-			num_server_rounds INTEGER,
-			fraction_evaluate REAL,
-			local_epochs INTEGER,
-			learning_rate REAL,
-			batch_size INTEGER,
-			model TEXT,
-			framework TEXT,
-			components JSONB,
-			filled BOOLEAN DEFAULT true,
-			requested_at TIMESTAMP,
-			filled_at TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS selected_providers JSONB DEFAULT '[]'`,
-		`ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS ip_address TEXT`,
-		`ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS port INTEGER`,
-		`ALTER TABLE form_submissions ADD COLUMN IF NOT EXISTS ram_usage INTEGER`,
-		`CREATE TABLE IF NOT EXISTS data_provider_forms (
-			id TEXT PRIMARY KEY,
-			form_id TEXT NOT NULL,
-			data_owner_id TEXT,
-			ram INTEGER,
-			memory_mb INTEGER,
-			data_size_bytes BIGINT,
-			data_resource_id TEXT,
-			ip_address TEXT,
-			port INTEGER,
-			filled BOOLEAN DEFAULT true,
-			filled_at TIMESTAMP,
-			submitted_by TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)`,
-		// ip_address/port were added to data_provider_forms by a later migration;
-		// keep these for databases created before they were part of the schema.
-		`ALTER TABLE data_provider_forms ADD COLUMN IF NOT EXISTS ip_address TEXT`,
-		`ALTER TABLE data_provider_forms ADD COLUMN IF NOT EXISTS port INTEGER`,
-		`ALTER TABLE data_provider_forms ADD COLUMN IF NOT EXISTS ram_usage INTEGER`,
+		// NOTE: form_submissions and data_provider_forms are no longer created or
+		// used here — the FL forms live in APD now and the gov form methods read
+		// and write them over HTTP (see apd_client.go). Only the tables gov still
+		// owns (notifications, session_reports, contracts) are provisioned below.
 		`CREATE TABLE IF NOT EXISTS notifications (
 			id TEXT PRIMARY KEY,
 			recipient_id TEXT NOT NULL,
@@ -164,6 +129,20 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Contracts assembled when the output owner selects providers. One row per
+		// session (session_id = form submission id); project_id is generated once
+		// and reused, so only parties_involved changes between the initial
+		// (participation-request) contract and the final (roster) contract.
+		`CREATE TABLE IF NOT EXISTS contracts (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			session_id TEXT UNIQUE NOT NULL,
+			output_owner_id TEXT,
+			finalized BOOLEAN DEFAULT false,
+			contract JSONB NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -171,21 +150,10 @@ func (d *DB) migrate(ctx context.Context) error {
 		}
 	}
 
-	// Add the form_id UNIQUE constraint when upgrading a table created without
-	// it. Mirrors the DO block in the Node code; failures are ignored (the
-	// constraint may already exist under a different path).
-	_, _ = d.Pool.Exec(ctx, `DO $$ BEGIN
-		IF NOT EXISTS (
-			SELECT 1 FROM pg_constraint WHERE conname = 'form_submissions_form_id_key'
-		) THEN
-			ALTER TABLE form_submissions ADD CONSTRAINT form_submissions_form_id_key UNIQUE (form_id);
-		END IF;
-	END $$;`)
-
-	log.Println("[DATABASE] Table form_submissions ready")
-	log.Println("[DATABASE] Table data_provider_forms ready")
+	log.Println("[DATABASE] FL forms (form_submissions, data_provider_forms) are served by APD")
 	log.Println("[DATABASE] Table notifications ready")
 	log.Println("[DATABASE] Table session_reports ready")
+	log.Println("[DATABASE] Table contracts ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }

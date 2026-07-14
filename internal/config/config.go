@@ -62,6 +62,7 @@ type Config struct {
 	OwnerRequirements             string        // OWNER_REQUIREMENTS (server requirements.txt)
 	FLSessionConfig               string        // FL_SESSION_CONFIG
 	FLServerEndpoint              string        // FL_SERVER_ENDPOINT (default localhost:12345)
+	CheckpointDir                 string        // CHECKPOINT_DIR (default FEDML_SRC/checkpoint) — where flo_server writes per-round global models
 	FLLogDir                      string        // FL_LOG_DIR
 	ProviderStartClientPath       string        // PROVIDER_START_CLIENT_PATH (default /start-client)
 	FLClientDelay                 time.Duration // FL_CLIENT_DELAY_MS (default 5000)
@@ -69,6 +70,9 @@ type Config struct {
 
 	// --- self-IP detection ---
 	OwnerSelfIPs string // OWNER_SELF_IPS (CSV)
+
+	// --- apd (form store of record) ---
+	APDURL string // APD_URL (default http://localhost:8091) — the FL forms live here now
 }
 
 // LoadEnv loads the service's own .env with OVERRIDE semantics, matching the
@@ -126,12 +130,15 @@ func Load() *Config {
 		OwnerRequirements:             getEnv("OWNER_REQUIREMENTS", filepath.Join(repoRoot, "fedml-ng-release-v1.0/src/server/requirements.txt")),
 		FLSessionConfig:               getEnv("FL_SESSION_CONFIG", "../config/flotilla_quicksetup_config.yaml"),
 		FLServerEndpoint:              getEnv("FL_SERVER_ENDPOINT", "localhost:12345"),
+		CheckpointDir:                 getEnv("CHECKPOINT_DIR", filepath.Join(repoRoot, "fedml-ng-release-v1.0/src/checkpoint")),
 		FLLogDir:                      getEnv("FL_LOG_DIR", filepath.Join(repoRoot, "logs")),
 		ProviderStartClientPath:       getEnv("PROVIDER_START_CLIENT_PATH", "/start-client"),
 		FLClientDelay:                 getEnvMS("FL_CLIENT_DELAY_MS", 5000),
 		FLSessionDelay:                getEnvMS("FL_SESSION_DELAY_MS", 30000),
 
 		OwnerSelfIPs: os.Getenv("OWNER_SELF_IPS"),
+
+		APDURL: getEnv("APD_URL", "http://localhost:8091"),
 	}
 	return c
 }
