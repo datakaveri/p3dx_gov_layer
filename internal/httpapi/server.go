@@ -1,14 +1,21 @@
-// Package httpapi implements the Governance Layer REST API. It reproduces
-// src/app.js + src/routes/governance.routes.js: the same endpoints, JSON shapes,
-// status codes, CORS behaviour and FL-orchestration semantics, mounted under both
-// /api/v1 and /governance.
+// Package httpapi implements the Governance Layer REST API: the routing
+// table, CORS, and every handler, mounted under both /api/v1 and /governance.
+//
+// Files prefixed fl_ are FL-only (forms, participation notifications, session
+// orchestration, self-IP detection, session reports). contracts.go and
+// model.go/inspect_model.py are also FL-specific today but keep their
+// original names pending a follow-up rename. server.go itself is shared
+// infra: Server, routing, CORS, JSON helpers.
 package httpapi
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -57,13 +64,15 @@ func (s *Server) Handler() http.Handler {
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
+// Every route below is FL-only.
 func (s *Server) registerRoutes(r chi.Router) {
+	// forms (fl_forms.go)
 	r.Post("/form-submissions", s.postFormSubmission)
 	r.Get("/form-submissions", s.getFormSubmissions)
 	r.Get("/form-submissions/export", s.exportFormSubmissions)
 	r.Get("/form-submissions/{id}", s.getFormSubmissionByID)
 	r.Delete("/form-submissions/{id}", s.deleteFormSubmission)
-	r.Get("/form-submissions/{id}/report", s.getSessionReport)
+	r.Get("/form-submissions/{id}/report", s.getSessionReport) // fl_report.go
 
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
@@ -71,19 +80,25 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/data-provider-forms", s.postDataProviderForm)
 	r.Get("/data-provider-forms", s.getDataProviderForms)
 
+	// participation-consent notifications (fl_notifications.go)
 	r.Post("/notifications", s.postNotifications)
 	r.Get("/notifications/by-sender/{key}", s.getNotificationsBySender)
 	r.Get("/notifications/{key}", s.getNotifications)
 	r.Patch("/notifications/{key}/read", s.patchNotificationRead)
 	r.Post("/notifications/{key}/respond", s.respondToNotification)
 
+	// session contract + final-model retrieval (contracts.go, model.go)
 	r.Post("/contracts", s.postContract)
 	r.Get("/contracts/{sessionId}", s.getContract)
+
+	// TOP contract endpoint (fl_contract.go)
+	r.Post("/contract", s.handleContract)
 
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
 	r.Get("/final-model/summary", s.getFinalModelSummary)
 
+	// session orchestration (fl_orchestration.go)
 	r.Post("/distribute-config", s.distributeConfig)
 	r.Post("/provision-env", s.provisionEnv)
 	r.Post("/push-config", s.pushConfig)
@@ -135,3 +150,23 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 
 // reqCtx returns the request context for DB/HTTP calls.
 func reqCtx(r *http.Request) context.Context { return r.Context() }
+
+// readBody decodes a JSON request body into dst. An empty body is treated as
+// an empty object (matching express.json). A genuine JSON syntax error
+// responds 400 INVALID_JSON and returns false.
+func (s *Server) readBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	err := decodeJSON(w, r, dst)
+	if err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, j{
+			"status": "FAILED", "error": "INVALID_JSON", "message": "Invalid JSON in request body",
+		})
+		return false
+	}
+	return true
+}
+
+// nowISO renders the current UTC time as an ISO-8601 string (matching JS
+// new Date().toISOString()).
+func nowISO() string {
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+}
