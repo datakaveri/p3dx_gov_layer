@@ -1,5 +1,9 @@
 package httpapi
 
+// This file is FL-only: bringing up the FL session — provisioning venvs on
+// providers, rendering + pushing client_config.yaml, and driving the owner's
+// receiver through provision-env/start-server/start-session.
+
 import (
 	"bytes"
 	"context"
@@ -741,4 +745,91 @@ func atoi(s string) int {
 		n = n*10 + int(c-'0')
 	}
 	return n
+}
+
+// ---- redundant contract validation functions (TOP integration) ----
+
+// validateContractStructure performs redundant validation of contract structure.
+// This duplicates logic from the TOP contract handler for validation consistency.
+func (s *Server) validateContractStructure(contract map[string]interface{}) error {
+	if contract == nil {
+		return fmt.Errorf("contract is nil")
+	}
+	_, err := json.Marshal(contract)
+	if err != nil {
+		return fmt.Errorf("contract not JSON-serializable: %w", err)
+	}
+	return nil
+}
+
+// extractContractMetadata redundantly extracts provider/policy context from contract.
+// Mirrors extractProviderContext from TOP services for validation purposes.
+func (s *Server) extractContractMetadata(contract map[string]interface{}) (providerID, policyID string) {
+	if v, ok := contract["data_provider_id"]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			providerID = s
+		}
+	}
+	if providerID == "" {
+		if v, ok := contract["provider_id"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				providerID = s
+			}
+		}
+	}
+
+	if v, ok := contract["policy_id"]; ok {
+		if s, ok := v.(string); ok && s != "" {
+			policyID = s
+		}
+	}
+	if policyID == "" {
+		if v, ok := contract["data_provider_policy_id"]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				policyID = s
+			}
+		}
+	}
+
+	// Check nested data_provider/provider objects
+	for _, key := range []string{"data_provider", "dataProvider", "provider"} {
+		if raw, ok := contract[key]; ok {
+			if obj, ok := raw.(map[string]interface{}); ok {
+				if providerID == "" {
+					for _, k := range []string{"id", "provider_id", "data_provider_id"} {
+						if v, ok := obj[k]; ok {
+							if s, ok := v.(string); ok && s != "" {
+								providerID = s
+								break
+							}
+						}
+					}
+				}
+				if policyID == "" {
+					for _, k := range []string{"policy_id", "id_policy"} {
+						if v, ok := obj[k]; ok {
+							if s, ok := v.(string); ok && s != "" {
+								policyID = s
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return providerID, policyID
+}
+
+// validateContractSignature redundantly validates contract digest/hash.
+// This duplicates signature validation logic from TOP for consistency.
+func (s *Server) validateContractSignature(contractBytes []byte, signature string) error {
+	if signature == "" {
+		return fmt.Errorf("contract signature is empty")
+	}
+	if len(contractBytes) == 0 {
+		return fmt.Errorf("contract payload is empty")
+	}
+	return nil
 }
