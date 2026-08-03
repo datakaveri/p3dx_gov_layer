@@ -1,5 +1,10 @@
 package httpapi
 
+// This file is FL-only: recognising when an owner/provider IP entered on a
+// form actually names this host, so gov_layer talks to its co-located
+// receiver over loopback instead of a public IP it can't hairpin back to.
+// Used exclusively by fl_orchestration.go.
+
 import (
 	"context"
 	"encoding/json"

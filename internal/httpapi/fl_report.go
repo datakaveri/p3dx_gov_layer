@@ -1,22 +1,18 @@
 package httpapi
 
+// This file is FL-only: the combined output-owner + data-provider session
+// report served/rebuilt at GET /form-submissions/{id}/report.
+
 import (
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
-
-// nowISO renders the current UTC time as an ISO-8601 string (matching JS
-// new Date().toISOString()).
-func nowISO() string {
-	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
-}
 
 type reportOwner struct {
 	Username         string          `json:"username"`

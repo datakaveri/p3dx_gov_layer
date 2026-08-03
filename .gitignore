@@ -4,3 +4,6 @@
 
 # Environment / secrets
 .env
+
+# Node.js (legacy; the service is now Go-only)
+node_modules/

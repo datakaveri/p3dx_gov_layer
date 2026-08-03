@@ -1,5 +1,8 @@
 package db
 
+// This file is FL-only: the mock provider directory and the free-text
+// messages an output owner sends a provider outside the notification flow.
+
 import (
 	"context"
 	"log"

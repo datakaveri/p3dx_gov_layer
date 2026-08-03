@@ -13,8 +13,8 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 
 > Ported from an original Node.js implementation to Go as a **drop-in
 > replacement**: identical REST + gRPC endpoints, JSON shapes, status codes, the
-> same `.env`, and the same `p3dx_governance` database. The original Node sources
-> are kept under `src/` for reference only and are not used at runtime.
+> same `.env`, and the same `p3dx_governance` database. The Node sources have
+> since been removed — this repo is Go-only.
 
 ---
 
@@ -122,25 +122,35 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 | `config/config.go` | Loads all runtime config from the environment and the service's own `.env` (**override** semantics so a sibling service's exported vars can't hijack this one). Holds the `Config` struct: DB connection, ports, Keycloak settings, FL-orchestration paths/timeouts, and `OWNER_SELF_IPS`. Also derives the Keycloak token URL and the owner-receiver fallback URL. |
 
 ### `internal/db` — PostgreSQL data layer (pgx)
+Files are prefixed `fl_` when the workflow they implement is FL-only; everything
+else is infrastructure shared by whatever else the service grows into.
+
 | File | Purpose |
 |------|---------|
-| `db/db.go` | Opens the connection pool, auto-creates the `p3dx_governance` database if missing, and runs idempotent **migrations** (all `CREATE TABLE` / `ALTER TABLE` for `form_submissions`, `data_provider_forms`, `notifications`, `session_reports`). |
+| `db/db.go` | Opens the connection pool, auto-creates the `p3dx_governance` database if missing, and runs idempotent **migrations** (`notifications`, `session_reports` — form storage now lives in APD, see below). |
 | `db/types.go` | Custom JSON types: `Real` (emits shortest float32 decimal so JSON matches the Node output) and `BigInt` (int64 that serializes safely). |
 | `db/helpers.go` | Shared helpers: `newID`/base36 id generation, `FlexFloat` (accepts string-or-number from the loosely-typed UI), and the `truthy*` / `jsonbOr` coercions used by inserts. |
-| `db/forms.go` | Output-owner `form_submissions`: `FormSubmission`/`FormInput` structs, `StoreFormSubmission` (upsert on `form_id`), list/get/delete, `SelectedProviderList()`, and `GetLatestSessionForProvider` (used by the provider-side config pull). |
-| `db/provider_forms.go` | Data-provider `data_provider_forms`: struct + input, `StoreDataProviderForm`, `GetAllDataProviderForms`, and `GetDataProviderFormsByUsernames` (latest form per provider — used to resolve each selected provider's ip/port/RAM). |
-| `db/notifications.go` | The `notifications` table and the whole consent loop: `CreateNotification`, `GetNotificationsForUser`, `MarkNotificationAsRead`, `RespondToNotification` (accepted/declined + reason), and `GetNotificationsBySender` (owner's responses view). |
-| `db/messages.go` | The mock `GetDataProviders` list and `StoreProviderMessage` (lazily-created `provider_messages` table for `/send-provider-message`). |
-| `db/reports.go` | `StoreSessionReport` (upsert on `submission_id`) and `GetSessionReport` for the combined FL session report. |
+| `db/apd_client.go` | HTTP client to APD, the store of record for FL forms (`APD_URL`). |
+| `db/fl_forms.go` | Output-owner form: `FormSubmission`/`FormInput` structs and the store/list/get/delete methods, backed by APD via `apd_client.go`. |
+| `db/fl_provider_forms.go` | Data-provider form: struct + input and its store/list methods, backed by APD. |
+| `db/fl_notifications.go` | The `notifications` table and the whole consent loop: `CreateNotification`, `GetNotificationsForUser`, `MarkNotificationAsRead`, `RespondToNotification` (accepted/declined + reason), and `GetNotificationsBySender` (owner's responses view). |
+| `db/fl_messages.go` | The mock `GetDataProviders` list and `StoreProviderMessage` (lazily-created `provider_messages` table for `/send-provider-message`). |
+| `db/fl_reports.go` | `StoreSessionReport` (upsert on `submission_id`) and `GetSessionReport` for the combined FL session report. |
+| `db/contracts.go` | The per-session FL contract in the standard contract JSON format (`project_id`, `lifecycle`, `parties`, `session_info`, `signatures`). Signing is not implemented yet — `signatures` is emitted empty. |
 
 ### `internal/httpapi` — REST API + FL orchestration
+Same `fl_` convention as above.
+
 | File | Purpose |
 |------|---------|
 | `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts **every** route under both `/api/v1` and `/governance`. Holds the `Server` (config + DB + Keycloak + self-IP set). |
-| `httpapi/handlers.go` | Request handlers for forms, data-providers, provider messages, and notifications (create / list / read / **respond** / **by-sender**). Thin layer over the `db` package. |
-| `httpapi/orchestration.go` | The FL control plane: render `client_config.yaml`, POST to receivers with auth + timeouts, fan out over selected providers in parallel (`provisionProviders`, `renderAndPushClientConfig`), provision the owner env, and tally per-target results. |
-| `httpapi/report.go` | Builds the combined report (`buildCombinedReport`), resolves `selectedUsernames`, persists it after a session, and serves `GET …/report`. |
-| `httpapi/selfip.go` | "This host" detection: seeds loopback + local interface IPs + `OWNER_SELF_IPS`, and `reachableHost()` rewrites a self IP to `127.0.0.1` (a VM can't reach its own public IP — Azure hairpin). Also discovers the public IP asynchronously. |
+| `httpapi/fl_forms.go` | Request handlers for forms, data-providers, and provider messages. Thin layer over the `db` package. |
+| `httpapi/fl_notifications.go` | Request handlers for notifications (create / list / read / **respond** / **by-sender**). |
+| `httpapi/fl_orchestration.go` | The FL control plane: render `client_config.yaml`, POST to receivers with auth + timeouts, fan out over selected providers in parallel (`provisionProviders`, `renderAndPushClientConfig`), provision the owner env, and tally per-target results. |
+| `httpapi/fl_report.go` | Builds the combined report (`buildCombinedReport`), resolves `selectedUsernames`, persists it after a session, and serves `GET …/report`. |
+| `httpapi/fl_selfip.go` | "This host" detection: seeds loopback + local interface IPs + `OWNER_SELF_IPS`, and `reachableHost()` rewrites a self IP to `127.0.0.1` (a VM can't reach its own public IP — Azure hairpin). Also discovers the public IP asynchronously. |
+| `httpapi/contracts.go` | `POST /contracts` / `GET /contracts/{sessionId}` — assembles and stores the per-session contract (`db/contracts.go`), called by the AAA layer. |
+| `httpapi/model.go`, `httpapi/inspect_model.py` | `GET /final-models`, `/final-model/download`, `/final-model/summary` — locates flo_server's per-round checkpoints in `CHECKPOINT_DIR` and summarises the highest-round one via the embedded, torch-free `.pt` reader script. |
 
 ### `internal/keycloak` — service-account auth
 | File | Purpose |
@@ -163,22 +173,23 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 | `protos/` | `.proto` service/message definitions. |
 | `.env.example` | Template for the runtime config (`.env` is gitignored — it holds secrets). |
 | `go.mod` / `go.sum` | Go module + dependency checksums. |
-| `src/` | Original Node.js implementation, retained for reference only. |
 
 ---
 
 ## Data model (tables, auto-migrated)
 
-- **`form_submissions`** — output-owner FL config: hyperparameters, `model`,
-  `framework`, `components`, `selected_providers` (JSONB), `ip_address`, `port`,
-  `ram_usage`.
-- **`data_provider_forms`** — provider registration: `data_owner_id`, `ram`,
-  `ram_usage`, `memory_mb`, `data_size_bytes`, `data_resource_id`, `ip_address`,
-  `port`.
+Output-owner and data-provider forms are **not** local tables anymore — APD is
+their store of record (`APD_URL`, see `db/apd_client.go`); this service just
+owns the struct shapes and forwards reads/writes over HTTP.
+
 - **`notifications`** — consent loop: `recipient_*`, `sender_username`, `message`,
   `payload` (JSONB, carries `kind`/`submission_id`/provider lists), `read`,
   `response` (`accepted`/`declined`), `response_message`.
 - **`session_reports`** — combined per-session report (upsert on `submission_id`).
+- **`contracts`** — the per-session FL contract: `project_id`, `session_id`
+  (unique), `output_owner_id`, `finalized`, and the full contract document
+  (`contract` JSONB, in the standard `project_id`/`lifecycle`/`parties`/
+  `session_info`/`signatures` shape — see `db/contracts.go`).
 - **`provider_messages`** — free-form provider messages (lazily created).
 
 ---

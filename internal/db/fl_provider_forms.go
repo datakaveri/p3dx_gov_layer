@@ -1,5 +1,9 @@
 package db
 
+// This file is FL-only: the data-provider form (host/resource details for one
+// FL participant), stored in APD as a document — see apd_client.go. TEE and
+// SMPC have no equivalent.
+
 import (
 	"context"
 	"encoding/json"
