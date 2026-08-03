@@ -1,5 +1,10 @@
 package db
 
+// This file is FL-only: the output-owner form (session parameters like model,
+// framework, server rounds). APD is the store of record for the document —
+// see apd_client.go — this file owns the struct shape and the coercions that
+// match what the old SQL store produced. TEE and SMPC have no equivalent.
+
 import (
 	"context"
 	"encoding/json"

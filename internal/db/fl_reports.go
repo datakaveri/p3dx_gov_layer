@@ -1,5 +1,8 @@
 package db
 
+// This file is FL-only: the combined output-owner + data-provider session
+// report generated once a form-submission's parties are known.
+
 import (
 	"context"
 	"encoding/json"

@@ -1,5 +1,9 @@
 package db
 
+// This file is FL-only: general-purpose notifications, used today for the
+// participation-consent loop (an output owner asks a selected provider "still
+// willing to join?" and the provider accepts/declines).
+
 import (
 	"context"
 	"encoding/json"
