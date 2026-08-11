@@ -1,11 +1,11 @@
 // Package httpapi implements the Governance Layer REST API: the routing
 // table, CORS, and every handler, mounted under both /api/v1 and /governance.
 //
-// Files prefixed fl_ are FL-only (forms, participation notifications, session
-// orchestration, self-IP detection, session reports). contracts.go and
-// model.go/inspect_model.py are also FL-specific today but keep their
-// original names pending a follow-up rename. server.go itself is shared
-// infra: Server, routing, CORS, JSON helpers.
+// Files prefixed fl_ are FL-specific (forms, participation notifications, session
+// orchestration, self-IP detection, session reports). contracts.go handles the FL
+// pathway (POST /contracts — forms-based contract assembly). general_contract.go
+// handles the general pathway (POST /contract — pre-built contracts with policy checks).
+// model.go handles final model retrieval. server.go itself is shared infra.
 package httpapi
 
 import (
@@ -64,9 +64,8 @@ func (s *Server) Handler() http.Handler {
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
-// Every route below is FL-only.
 func (s *Server) registerRoutes(r chi.Router) {
-	// forms (fl_forms.go)
+	// FL-specific forms endpoints (fl_forms.go)
 	r.Post("/form-submissions", s.postFormSubmission)
 	r.Get("/form-submissions", s.getFormSubmissions)
 	r.Get("/form-submissions/export", s.exportFormSubmissions)
@@ -80,18 +79,19 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/data-provider-forms", s.postDataProviderForm)
 	r.Get("/data-provider-forms", s.getDataProviderForms)
 
-	// participation-consent notifications (fl_notifications.go)
+	// FL-specific participation-consent notifications (fl_notifications.go)
 	r.Post("/notifications", s.postNotifications)
 	r.Get("/notifications/by-sender/{key}", s.getNotificationsBySender)
 	r.Get("/notifications/{key}", s.getNotifications)
 	r.Patch("/notifications/{key}/read", s.patchNotificationRead)
 	r.Post("/notifications/{key}/respond", s.respondToNotification)
 
-	// session contract + final-model retrieval (contracts.go, model.go)
+	// Two contract pathways:
+	// 1. FL pathway: POST /contracts (forms-based assembly) — contracts.go
 	r.Post("/contracts", s.postContract)
 	r.Get("/contracts/{sessionId}", s.getContract)
 
-	// TOP contract endpoint (fl_contract.go)
+	// 2. General pathway: POST /contract (pre-built with policy checks) — general_contract.go
 	r.Post("/contract", s.handleContract)
 
 	r.Get("/final-models", s.getFinalModels)
