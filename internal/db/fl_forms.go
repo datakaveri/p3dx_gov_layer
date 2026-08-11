@@ -1,20 +1,19 @@
 package db
 
 // This file is FL-only: the output-owner form (session parameters like model,
-// framework, server rounds). APD is the store of record for the document —
-// see apd_client.go — this file owns the struct shape and the coercions that
-// match what the old SQL store produced. TEE and SMPC have no equivalent.
+// framework, server rounds). aaa is the store of record for the document —
+// it pushes each submission here as it's created (see
+// httpapi/forms_ingest.go and forms_cache.go) — this file just owns the
+// struct shape and the read methods FL orchestration/reports use.
 
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 )
 
-// FormSubmission is one output-owner form. JSON tags reproduce the shape the
-// service has always returned to clients; the form is stored in APD as this exact
-// JSON document and reconstructed here on read.
+// FormSubmission is one output-owner form. JSON tags match the document aaa
+// pushes here verbatim.
 type FormSubmission struct {
 	ID                string          `db:"id" json:"id"`
 	FormID            string          `db:"form_id" json:"form_id"`
@@ -36,30 +35,6 @@ type FormSubmission struct {
 	IPAddress         *string         `db:"ip_address" json:"ip_address"`
 	Port              *int32          `db:"port" json:"port"`
 	RAMUsage          *int32          `db:"ram_usage" json:"ram_usage"`
-}
-
-// FormInput is the inbound payload for storing an output-owner form (the REST
-// `payload` object or the gRPC FormSubmission mapped to it). Optional numerics
-// are FlexFloat so "absent" and "present" are distinguishable before applying the
-// `value || null` coercion.
-type FormInput struct {
-	FormID            string          `json:"form_id"`
-	RequestedBy       string          `json:"requested_by"`
-	OutputOwnerID     string          `json:"output_owner_id"`
-	NumServerRounds   FlexFloat       `json:"num_server_rounds"`
-	FractionEvaluate  FlexFloat       `json:"fraction_evaluate"`
-	LocalEpochs       FlexFloat       `json:"local_epochs"`
-	LearningRate      FlexFloat       `json:"learning_rate"`
-	BatchSize         FlexFloat       `json:"batch_size"`
-	Model             *string         `json:"model"`
-	Framework         *string         `json:"framework"`
-	Components        json.RawMessage `json:"components"`
-	SelectedProviders json.RawMessage `json:"selected_providers"`
-	IPAddress         *string         `json:"ip_address"`
-	Port              FlexFloat       `json:"port"`
-	RAMUsage          FlexFloat       `json:"ram_usage"`
-	RequestedAt       *string         `json:"requested_at"`
-	FilledAt          *string         `json:"filled_at"`
 }
 
 // SelectedProvider is one entry of the selected_providers JSONB array.
@@ -90,119 +65,26 @@ func (f *FormSubmission) IP() string {
 	return *f.IPAddress
 }
 
-// --- FlexFloat -> typed pointer, applying the `value || null` coercion (0/absent
-// => nil), matching the SQL-side truthy* helpers the store previously used. ---
-
-func flexInt32(f FlexFloat) *int32 {
-	if p := f.ptr(); p != nil && *p != 0 {
-		v := int32(*p)
-		return &v
-	}
-	return nil
+// IngestFormSubmission stores a submission pushed here by aaa, replacing any
+// earlier push for the same id. Called by POST /internal/forms/submissions.
+func (d *DB) IngestFormSubmission(sub FormSubmission, receivedAt time.Time) {
+	d.forms.putSubmission(sub, receivedAt)
 }
 
-func flexReal(f FlexFloat) *Real {
-	if p := f.ptr(); p != nil && *p != 0 {
-		v := Real(*p)
-		return &v
-	}
-	return nil
+// RemoveFormSubmission evicts a submission aaa reports as deleted, and
+// reports whether it was present. Called by DELETE /internal/forms/submissions/{id}.
+func (d *DB) RemoveFormSubmission(_ context.Context, id string) bool {
+	return d.forms.removeSubmission(id)
 }
 
-func flexBigInt(f FlexFloat) *BigInt {
-	if p := f.ptr(); p != nil && *p != 0 {
-		v := BigInt(int64(*p))
-		return &v
-	}
-	return nil
+// GetFormSubmissionByID returns one form or nil when not cached.
+func (d *DB) GetFormSubmissionByID(_ context.Context, id string) (*FormSubmission, error) {
+	return d.forms.getSubmission(id), nil
 }
 
-// strOrNil returns p when it points to a non-empty string, else nil (JS `value || null`).
-func strOrNil(p *string) *string {
-	if p != nil && *p != "" {
-		return p
-	}
-	return nil
-}
-
-// StoreFormSubmission upserts an output-owner form in APD (keyed on form_id: an
-// existing form_id is updated in place, a new one gets a freshly minted id).
-// Returns the submission id. The form document and the coercions match what the
-// SQL store produced.
-func (d *DB) StoreFormSubmission(ctx context.Context, in *FormInput) (string, error) {
-	now := time.Now().UTC()
-	requestedAt := parseTimeOr(in.RequestedAt, now)
-	filled := true
-	selectedProviders := json.RawMessage(jsonbOr(in.SelectedProviders, "[]"))
-	ip := strOrNil(in.IPAddress)
-
-	candidateID := newID("gov", 9)
-	sub := FormSubmission{
-		ID:                candidateID,
-		FormID:            in.FormID,
-		RequestedBy:       in.RequestedBy,
-		OutputOwnerID:     in.OutputOwnerID,
-		NumServerRounds:   flexInt32(in.NumServerRounds),
-		FractionEvaluate:  flexReal(in.FractionEvaluate),
-		LocalEpochs:       flexInt32(in.LocalEpochs),
-		LearningRate:      flexReal(in.LearningRate),
-		BatchSize:         flexInt32(in.BatchSize),
-		Model:             strOrNil(in.Model),
-		Framework:         strOrNil(in.Framework),
-		Components:        json.RawMessage(jsonbOr(in.Components, "{}")),
-		Filled:            &filled,
-		RequestedAt:       &requestedAt,
-		FilledAt:          &now,
-		SelectedProviders: selectedProviders,
-		IPAddress:         ip,
-		Port:              flexInt32(in.Port),
-		RAMUsage:          flexInt32(in.RAMUsage),
-	}
-
-	doc, err := json.Marshal(sub)
-	if err != nil {
-		return "", err
-	}
-	id, err := d.apd.upsertSubmission(ctx, candidateID, in.FormID, in.OutputOwnerID, ip != nil, selectedProviders, doc)
-	if err != nil {
-		return "", err
-	}
-	log.Println("[DATABASE] Form submission stored in APD:", id)
-	return id, nil
-}
-
-// GetAllFormSubmissions returns every form ordered newest-first (from APD).
-func (d *DB) GetAllFormSubmissions(ctx context.Context) ([]FormSubmission, error) {
-	return d.apd.listSubmissions(ctx)
-}
-
-// GetFormSubmissionByID returns one form or (nil, nil) when not found (from APD).
-func (d *DB) GetFormSubmissionByID(ctx context.Context, id string) (*FormSubmission, error) {
-	return d.apd.getSubmission(ctx, id)
-}
-
-// DeleteFormSubmission deletes by id and reports whether a row was removed (in APD).
-func (d *DB) DeleteFormSubmission(ctx context.Context, id string) (bool, error) {
-	return d.apd.deleteSubmission(ctx, id)
-}
-
-// GetLatestSessionForProvider finds the most recent submission that has an owner
-// ip_address set and lists the given provider in selected_providers, or (nil, nil)
-// if none (from APD).
-func (d *DB) GetLatestSessionForProvider(ctx context.Context, username string) (*FormSubmission, error) {
-	return d.apd.latestSubmissionForProvider(ctx, username)
-}
-
-// parseTimeOr parses an optional RFC3339 timestamp string, falling back to def.
-func parseTimeOr(s *string, def time.Time) time.Time {
-	if s == nil || *s == "" {
-		return def
-	}
-	if t, err := time.Parse(time.RFC3339, *s); err == nil {
-		return t
-	}
-	if t, err := time.Parse(time.RFC3339Nano, *s); err == nil {
-		return t
-	}
-	return def
+// GetLatestSessionForProvider finds the most recently pushed submission that
+// has an owner ip_address set and lists the given provider in
+// selected_providers, or nil if none.
+func (d *DB) GetLatestSessionForProvider(_ context.Context, username string) (*FormSubmission, error) {
+	return d.forms.latestForProvider(username), nil
 }

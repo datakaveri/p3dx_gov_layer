@@ -20,7 +20,6 @@ import (
 type Config struct {
 	// --- server ---
 	RESTPort string // PORT (default 8083)
-	GRPCPort string // GRPC_PORT (default 50052)
 	NodeEnv  string // NODE_ENV (default "development")
 	CORSRaw  string // CORS_ORIGINS (raw, for the startup log line)
 
@@ -71,8 +70,8 @@ type Config struct {
 	// --- self-IP detection ---
 	OwnerSelfIPs string // OWNER_SELF_IPS (CSV)
 
-	// --- apd (form store of record) ---
-	APDURL string // APD_URL (default http://localhost:8091) — the FL forms live here now
+	// --- forms ingest (aaa pushes form data here; see httpapi/forms_ingest.go) ---
+	FormsPushToken string // FORMS_PUSH_TOKEN — shared secret aaa sends on pushes; empty disables the check
 }
 
 // LoadEnv loads the service's own .env with OVERRIDE semantics, matching the
@@ -94,7 +93,6 @@ func Load() *Config {
 
 	c := &Config{
 		RESTPort: getEnv("PORT", "8083"),
-		GRPCPort: getEnv("GRPC_PORT", "50052"),
 		NodeEnv:  os.Getenv("NODE_ENV"),
 		CORSRaw:  os.Getenv("CORS_ORIGINS"),
 
@@ -138,7 +136,7 @@ func Load() *Config {
 
 		OwnerSelfIPs: os.Getenv("OWNER_SELF_IPS"),
 
-		APDURL: getEnv("APD_URL", "http://localhost:8091"),
+		FormsPushToken: os.Getenv("FORMS_PUSH_TOKEN"),
 	}
 	return c
 }

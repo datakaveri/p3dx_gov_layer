@@ -59,27 +59,24 @@ func (s *Server) Handler() http.Handler {
 	root.Use(s.corsMiddleware)
 	root.Route("/api/v1", s.registerRoutes)
 	root.Route("/governance", s.registerRoutes)
+	// Server-to-server push from aaa (forms_ingest.go) — not part of the
+	// public API tree, no CORS involved.
+	root.Route("/internal/forms", s.registerFormsIngestRoutes)
 	return root
 }
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
 func (s *Server) registerRoutes(r chi.Router) {
-	// FL-specific forms endpoints (fl_forms.go)
-	r.Post("/form-submissions", s.postFormSubmission)
-	r.Get("/form-submissions", s.getFormSubmissions)
-	r.Get("/form-submissions/export", s.exportFormSubmissions)
-	r.Get("/form-submissions/{id}", s.getFormSubmissionByID)
-	r.Delete("/form-submissions/{id}", s.deleteFormSubmission)
+	// forms live entirely in aaa now — no form CRUD is exposed here. The
+	// session report is a derived feature (not the form itself), so it stays;
+	// it reads form data internally from aaa via the db package.
 	r.Get("/form-submissions/{id}/report", s.getSessionReport) // fl_report.go
 
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
 
-	r.Post("/data-provider-forms", s.postDataProviderForm)
-	r.Get("/data-provider-forms", s.getDataProviderForms)
-
-	// FL-specific participation-consent notifications (fl_notifications.go)
+	// participation-consent notifications (fl_notifications.go)
 	r.Post("/notifications", s.postNotifications)
 	r.Get("/notifications/by-sender/{key}", s.getNotificationsBySender)
 	r.Get("/notifications/{key}", s.getNotifications)
