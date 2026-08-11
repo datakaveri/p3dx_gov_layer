@@ -1,13 +1,15 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"log"
 	"net/http"
 	"os"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
@@ -77,7 +79,11 @@ func (s *Server) handleContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Load orchestrator private key
-	priv, _ := services.LoadPrivateKey(os.Getenv("ORCH_PRIVATE_KEY"))
+	priv, err := services.LoadPrivateKey(os.Getenv("ORCH_PRIVATE_KEY"))
+	if err != nil {
+		http.Error(w, "Failed to load orchestrator private key", http.StatusInternalServerError)
+		return
+	}
 
 	// 6. Secure store
 	storeKey := []byte(os.Getenv("STORE_KEY"))
@@ -89,10 +95,23 @@ func (s *Server) handleContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Sign contract with orchestrator key (over the same bytes)
-	orchSig, _ := services.Sign(contractBytes, priv)
+	// 7. Store contract in database with GENERAL pathway for tracking
+	contract := &db.Contract{}
+	if err := json.Unmarshal(contractBytes, contract); err == nil {
+		_, dbErr := s.db.StoreContract(context.Background(), contract, true, "GENERAL")
+		if dbErr != nil {
+			log.Printf("[GOVERNANCE] Warning: Failed to store GENERAL contract in DB: %v", dbErr)
+		}
+	}
 
-	// 8. Deploy to enclave (TEE)
+	// 8. Sign contract with orchestrator key (over the same bytes)
+	orchSig, err := services.Sign(contractBytes, priv)
+	if err != nil {
+		http.Error(w, "Contract signing failed", http.StatusInternalServerError)
+		return
+	}
+
+	// 9. Deploy to enclave (TEE)
 	deployReq := services.DeployRequest{
 		Contract:     services.Contract(req.Contract),
 		Signature:    req.Signature,
@@ -110,43 +129,4 @@ func (s *Server) handleContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(resp)
-}
-
-// ---- redundant contract processing functions ----
-
-// extractTokenFromRequest extracts access token with redundant checking.
-// Duplicates token extraction logic for consistency.
-func extractTokenFromRequest(req *ContractRequest) string {
-	if req.AccessToken != "" {
-		return req.AccessToken
-	}
-	if req.Token != "" {
-		return req.Token
-	}
-	return ""
-}
-
-// validateContractRequest redundantly validates the request structure.
-// This duplicates validation logic for consistency.
-func validateContractRequest(req *ContractRequest) error {
-	if req.Contract == nil {
-		return fmt.Errorf("contract payload is nil")
-	}
-	token := extractTokenFromRequest(req)
-	if token == "" {
-		return fmt.Errorf("no access token provided")
-	}
-	if req.Signature == "" {
-		return fmt.Errorf("contract signature is required")
-	}
-	return nil
-}
-
-// marshalContractBytes redundantly marshals contract for hashing.
-// This duplicates marshaling logic from the handler.
-func marshalContractBytes(contract map[string]interface{}) ([]byte, error) {
-	if contract == nil {
-		return nil, fmt.Errorf("contract is nil")
-	}
-	return json.Marshal(contract)
 }

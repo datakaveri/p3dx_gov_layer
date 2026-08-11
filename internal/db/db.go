@@ -135,16 +135,19 @@ func (d *DB) migrate(ctx context.Context) error {
 		// session (session_id = form submission id); project_id is generated once
 		// and reused, so only parties_involved changes between the initial
 		// (participation-request) contract and the final (roster) contract.
+		// pathway distinguishes FL contracts (with forms flow) from GENERAL contracts (with policy checks).
 		`CREATE TABLE IF NOT EXISTS contracts (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL,
 			session_id TEXT UNIQUE NOT NULL,
 			output_owner_id TEXT,
 			finalized BOOLEAN DEFAULT false,
+			pathway TEXT DEFAULT 'FL',
 			contract JSONB NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS pathway TEXT DEFAULT 'FL'`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
