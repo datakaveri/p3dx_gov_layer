@@ -34,7 +34,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize)
+	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, j{
@@ -49,7 +49,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contractID, err := s.db.StoreContract(reqCtx(r), contract, body.Finalize)
+	contractID, err := s.db.StoreContract(reqCtx(r), contract, body.Finalize, "FL")
 	if err != nil {
 		log.Println("[GOVERNANCE] Error storing contract:", err)
 		writeJSON(w, http.StatusInternalServerError, j{

@@ -162,7 +162,11 @@ func (d *DB) existingContractID(ctx context.Context, sessionID string) string {
 // their latest form. It reuses an already-assigned project_id and contract_id for
 // the session so only the parties change between the initial and final contracts.
 // finalize sets version=2 (the final roster contract) vs. version=1 (the draft).
-func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool) (*Contract, error) {
+// pathway indicates whether this is an FL contract (with forms flow) or GENERAL (with policy checks).
+func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway string) (*Contract, error) {
+	if pathway == "" {
+		pathway = "FL"
+	}
 	sub, err := d.GetFormSubmissionByID(ctx, submissionID)
 	if err != nil {
 		return nil, err
@@ -283,28 +287,32 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 
 // StoreContract upserts a contract keyed by session_id (one contract per session).
 // finalized marks the final roster contract vs. the initial participation-request
-// draft. Returns the contract row id.
-func (d *DB) StoreContract(ctx context.Context, c *Contract, finalized bool) (string, error) {
+// draft. pathway indicates FL or GENERAL. Returns the contract row id.
+func (d *DB) StoreContract(ctx context.Context, c *Contract, finalized bool, pathway string) (string, error) {
+	if pathway == "" {
+		pathway = "FL"
+	}
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
 	var id string
 	err = d.Pool.QueryRow(ctx, `INSERT INTO contracts
-			(id, project_id, session_id, output_owner_id, finalized, contract)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (session_id) DO UPDATE SET
 			output_owner_id = EXCLUDED.output_owner_id,
 			finalized = contracts.finalized OR EXCLUDED.finalized,
+			pathway = EXCLUDED.pathway,
 			contract = EXCLUDED.contract,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
-		newID("con", 9), c.ProjectID, c.SessionInfo.SessionID, c.SessionInfo.OutputOwnerID, finalized, raw,
+		newID("con", 9), c.ProjectID, c.SessionInfo.SessionID, c.SessionInfo.OutputOwnerID, finalized, pathway, raw,
 	).Scan(&id)
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[DATABASE] Contract stored (session=%s project=%s finalized=%t): %s", c.SessionInfo.SessionID, c.ProjectID, finalized, id)
+	log.Printf("[DATABASE] Contract stored (session=%s project=%s pathway=%s finalized=%t): %s", c.SessionInfo.SessionID, c.ProjectID, pathway, finalized, id)
 	return id, nil
 }
 
