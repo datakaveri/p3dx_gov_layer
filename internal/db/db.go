@@ -16,11 +16,13 @@ import (
 )
 
 // DB wraps the connection pool to the target (p3dx_governance) database and the
-// APD client. The FL forms (output-owner submissions + data-provider forms) live
-// in APD now, so the form methods go through apd rather than Pool.
+// forms cache. The FL forms (output-owner submissions + data-provider forms)
+// live in aaa now; forms holds a local copy pushed here by aaa (see
+// forms_cache.go and httpapi/forms_ingest.go), so the form read methods go
+// through forms rather than Pool.
 type DB struct {
-	Pool *pgxpool.Pool
-	apd  *apdClient
+	Pool  *pgxpool.Pool
+	forms *formsCache
 }
 
 // dsn builds a libpq key/value DSN for the given database name. SSL is disabled
@@ -83,7 +85,7 @@ func Initialize(ctx context.Context, cfg *config.Config) (*DB, error) {
 	}
 	log.Printf("[DATABASE] Connected to database '%s'", dbName)
 
-	d := &DB{Pool: pool, apd: newAPDClient(cfg.APDURL)}
+	d := &DB{Pool: pool, forms: newFormsCache()}
 	if err := d.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -99,9 +101,9 @@ func (d *DB) Close() { d.Pool.Close() }
 func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
 		// NOTE: form_submissions and data_provider_forms are no longer created or
-		// used here — the FL forms live in APD now and the gov form methods read
-		// and write them over HTTP (see apd_client.go). Only the tables gov still
-		// owns (notifications, session_reports, contracts) are provisioned below.
+		// used here — the FL forms live in aaa now, which pushes them to an
+		// in-memory cache (see forms_cache.go). Only the tables gov still owns
+		// (notifications, session_reports, contracts) are provisioned below.
 		`CREATE TABLE IF NOT EXISTS notifications (
 			id TEXT PRIMARY KEY,
 			recipient_id TEXT NOT NULL,

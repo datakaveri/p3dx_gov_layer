@@ -102,30 +102,6 @@ func selectedUsernames(sub *db.FormSubmission) []string {
 	return out
 }
 
-// persistSessionReport builds and stores the combined report for a submission.
-// Used as the best-effort step of POST /form-submissions.
-func (s *Server) persistSessionReport(r *http.Request, submissionID string) error {
-	ctx := reqCtx(r)
-	sub, err := s.db.GetFormSubmissionByID(ctx, submissionID)
-	if err != nil {
-		return err
-	}
-	if sub == nil {
-		return fmt.Errorf("submission %s not found", submissionID)
-	}
-	forms, err := s.db.GetDataProviderFormsByUsernames(ctx, selectedUsernames(sub))
-	if err != nil {
-		return err
-	}
-	report := buildCombinedReport(sub, forms)
-	raw, err := json.Marshal(report)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.StoreSessionReport(ctx, submissionID, sub.FormID, sub.OutputOwnerID, raw)
-	return err
-}
-
 // GET /form-submissions/{id}/report — serve the persisted combined report, or
 // rebuild + persist it on the fly for older submissions. Mirrors the Node handler.
 func (s *Server) getSessionReport(w http.ResponseWriter, r *http.Request) {

@@ -1,27 +1,29 @@
 # P3DX Governance Layer (Go)
 
 The **Governance Layer** is the coordination brain of the P3DX federated-learning
-(FL) system. It stores the forms that Output Owners and Data Providers submit,
-decides/records which providers participate in a session, renders and distributes
-the FL client configuration, and orchestrates an FL round end-to-end
-(provisioning Python environments and launching the FL server + clients through
-the control-plane receivers). It also brokers the participation "consent"
-messaging between owners and providers and persists a combined session report.
+(FL) system. Output Owners and Data Providers submit their forms to **aaa**, not
+here — aaa pushes each one to the governance layer as it's created, and this
+service keeps a local, in-memory copy to drive everything downstream: deciding
+which providers participate in a session, rendering and distributing the FL
+client configuration, and orchestrating an FL round end-to-end (provisioning
+Python environments and launching the FL server + clients through the
+control-plane receivers). It also brokers the participation "consent" messaging
+between owners and providers and persists a combined session report.
 
-It speaks **REST** to the UI and the AAA backend, and **gRPC** to other backend
-services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
+It speaks **REST** to the UI and aaa, and it is backed by a **PostgreSQL**
+database (`p3dx_governance`).
 
 > Ported from an original Node.js implementation to Go as a **drop-in
-> replacement**: identical REST + gRPC endpoints, JSON shapes, status codes, the
+> replacement**: identical REST endpoints, JSON shapes, status codes, the
 > same `.env`, and the same `p3dx_governance` database. The Node sources have
-> since been removed — this repo is Go-only.
+> since been removed — this repo is Go-only. Form storage (and the gRPC
+> `GovernanceService` that used to front it) has since moved to aaa; see
+> "Where forms live" below.
 
 ---
 
 ## What the Governance Layer is used for
 
-- **Form storage** — persists Output Owner FL-config forms (`form_submissions`)
-  and Data Provider registration forms (`data_provider_forms`).
 - **Participation selection & consent** — records which providers an owner
   selected, and carries the notification loop: owner invites → provider
   accepts/declines (with a reason) → owner sees the responses → owner sends a
@@ -36,17 +38,36 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 
 ---
 
+## Where forms live
+
+Output-owner and data-provider forms are created and stored entirely in **aaa**
+(immudb) — this service has no form CRUD at all. What it does have:
+
+- `POST /internal/forms/submissions` / `POST /internal/forms/provider-forms` —
+  aaa pushes each form here right after storing it (best-effort on aaa's side).
+- `DELETE /internal/forms/submissions/{id}` — aaa pushes a delete the same way.
+- An in-memory cache (`db/forms_cache.go`) holding whatever's been pushed so
+  far, read by FL orchestration/reports/contracts (`GetFormSubmissionByID`,
+  `GetLatestSessionForProvider`, `GetDataProviderFormsByUsernames`).
+
+The cache is **not** a form store in its own right and has no backfill: on
+restart it's empty until aaa pushes again (which happens on the next form
+create/update). See `internal/httpapi/forms_ingest.go`.
+
+---
+
 ## Where it sits (architecture)
 
 ```
         ┌─────────────┐        ┌──────────────┐
-        │  UI (React) │        │ AAA backend  │
+        │  UI (React) │        │     aaa      │
         └──────┬──────┘        └──────┬───────┘
-               │  HTTP (/api/v1, /governance)
-               ▼                      ▼
+               │  HTTP (/api/v1,      │  forms created/stored
+               │        /governance)  │  here; pushed to gov layer
+               ▼                      ▼  (/internal/forms/*)
         ┌──────────────────────────────────────────┐
         │        Governance Layer (this repo)       │
-        │        REST :8084   ·   gRPC :50052        │
+        │              REST :8084                   │
         └───┬───────────────┬──────────────┬────────┘
             │               │              │
             ▼               ▼              ▼
@@ -57,9 +78,8 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 ```
 
 - **REST API** — port `8083` in code, set to `8084` in `.env`; used by the UI and
-  AAA backend. Every route is mounted under **both** `/api/v1` and `/governance`.
-- **gRPC server** — port `50052`; `GovernanceService` for backend-to-backend form
-  operations.
+  aaa. Every route is mounted under **both** `/api/v1` and `/governance`; the
+  forms-push endpoints are mounted separately under `/internal/forms`.
 - **PostgreSQL** — `p3dx_governance`; schema auto-created/migrated on startup.
 - **Keycloak** — optional; provides a service-account token so gov_layer can
   authenticate to the FL receivers.
@@ -72,13 +92,14 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 
 ## End-to-end FL flow (through the Governance Layer)
 
-1. **Providers advertise** — each Data Provider submits a registration form
-   (`POST /data-provider-forms`) carrying its `ip_address`, `port`, RAM, RAM
-   usage, disk and data size. This is stored in `data_provider_forms`.
+1. **Providers advertise** — each Data Provider submits a registration form to
+   **aaa**, carrying its `ip_address`, `port`, RAM, RAM usage, disk and data
+   size. aaa stores it and pushes it here (`POST /internal/forms/provider-forms`).
 
 2. **Owner configures & selects** — the Output Owner submits an FL config form
-   (`POST /form-submissions`) that includes `selected_providers` (the chosen
-   subset). Upserted on `form_id`, so re-submitting updates the same row/id.
+   to **aaa**, which includes `selected_providers` (the chosen subset) — upserted
+   on `form_id`, so re-submitting updates the same id — and pushes it here
+   (`POST /internal/forms/submissions`).
 
 3. **Consent loop (notifications)**
    - Owner invites the selected providers (`POST /notifications`, kind
@@ -114,7 +135,7 @@ services, and it is backed by a **PostgreSQL** database (`p3dx_governance`).
 ### Entry point
 | File | Purpose |
 |------|---------|
-| `cmd/server/main.go` | Process entry point. Loads config, opens the DB (runs migrations), builds the Keycloak client, starts the **REST** server and the **gRPC** server, and handles graceful shutdown. |
+| `cmd/server/main.go` | Process entry point. Loads config, opens the DB (runs migrations), builds the Keycloak client, starts the **REST** server, and handles graceful shutdown. |
 
 ### `internal/config` — configuration
 | File | Purpose |
@@ -127,12 +148,12 @@ else is infrastructure shared by whatever else the service grows into.
 
 | File | Purpose |
 |------|---------|
-| `db/db.go` | Opens the connection pool, auto-creates the `p3dx_governance` database if missing, and runs idempotent **migrations** (`notifications`, `session_reports` — form storage now lives in APD, see below). |
+| `db/db.go` | Opens the connection pool, auto-creates the `p3dx_governance` database if missing, and runs idempotent **migrations** (`notifications`, `session_reports` — form storage lives in aaa, see "Where forms live" above). |
 | `db/types.go` | Custom JSON types: `Real` (emits shortest float32 decimal so JSON matches the Node output) and `BigInt` (int64 that serializes safely). |
-| `db/helpers.go` | Shared helpers: `newID`/base36 id generation, `FlexFloat` (accepts string-or-number from the loosely-typed UI), and the `truthy*` / `jsonbOr` coercions used by inserts. |
-| `db/apd_client.go` | HTTP client to APD, the store of record for FL forms (`APD_URL`). |
-| `db/fl_forms.go` | Output-owner form: `FormSubmission`/`FormInput` structs and the store/list/get/delete methods, backed by APD via `apd_client.go`. |
-| `db/fl_provider_forms.go` | Data-provider form: struct + input and its store/list methods, backed by APD. |
+| `db/helpers.go` | Shared helpers: `newID`/base36 id generation and the `jsonbOr` coercion used by inserts. |
+| `db/forms_cache.go` | In-memory cache of forms pushed here by aaa (`formsCache`) — no HTTP calls, no persistence. Read by the methods below; written only by `httpapi/forms_ingest.go`. |
+| `db/fl_forms.go` | Output-owner form: the `FormSubmission` struct and `GetFormSubmissionByID`/`GetLatestSessionForProvider`/`IngestFormSubmission`/`RemoveFormSubmission`, all backed by `forms_cache.go`. |
+| `db/fl_provider_forms.go` | Data-provider form: the `DataProviderForm` struct and `GetDataProviderFormsByUsernames`/`IngestDataProviderForm`, backed by `forms_cache.go`. |
 | `db/fl_notifications.go` | The `notifications` table and the whole consent loop: `CreateNotification`, `GetNotificationsForUser`, `MarkNotificationAsRead`, `RespondToNotification` (accepted/declined + reason), and `GetNotificationsBySender` (owner's responses view). |
 | `db/fl_messages.go` | The mock `GetDataProviders` list and `StoreProviderMessage` (lazily-created `provider_messages` table for `/send-provider-message`). |
 | `db/fl_reports.go` | `StoreSessionReport` (upsert on `submission_id`) and `GetSessionReport` for the combined FL session report. |
@@ -143,8 +164,9 @@ Same `fl_` convention as above.
 
 | File | Purpose |
 |------|---------|
-| `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts **every** route under both `/api/v1` and `/governance`. Holds the `Server` (config + DB + Keycloak + self-IP set). |
-| `httpapi/fl_forms.go` | Request handlers for forms, data-providers, and provider messages. Thin layer over the `db` package. |
+| `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts **every** route under both `/api/v1` and `/governance`, plus `/internal/forms` for aaa's pushes. Holds the `Server` (config + DB + Keycloak + self-IP set). |
+| `httpapi/forms_ingest.go` | Receives aaa's form pushes (`POST/DELETE /internal/forms/...`) and writes them into `db/forms_cache.go`. Optionally guarded by `FORMS_PUSH_TOKEN`. |
+| `httpapi/fl_forms.go` | Request handlers for the mock provider directory and provider messages. Thin layer over the `db` package — no form handlers live here. |
 | `httpapi/fl_notifications.go` | Request handlers for notifications (create / list / read / **respond** / **by-sender**). |
 | `httpapi/fl_orchestration.go` | The FL control plane: render `client_config.yaml`, POST to receivers with auth + timeouts, fan out over selected providers in parallel (`provisionProviders`, `renderAndPushClientConfig`), provision the owner env, and tally per-target results. |
 | `httpapi/fl_report.go` | Builds the combined report (`buildCombinedReport`), resolves `selectedUsernames`, persists it after a session, and serves `GET …/report`. |
@@ -157,20 +179,9 @@ Same `fl_` convention as above.
 |------|---------|
 | `keycloak/keycloak.go` | Fetches and caches a Keycloak service-account token (client-credentials grant) and builds the `Authorization` headers for calls to the FL receivers. Falls back to a static `PUSH_AUTH_TOKEN` when Keycloak isn't configured. |
 
-### `internal/grpcsrv` — gRPC service
-| File | Purpose |
-|------|---------|
-| `grpcsrv/server.go` | Implements `GovernanceService` on `:50052`: `SubmitForm`, `GetForm`, `GetAllForms`, `DeleteForm`, backed by the same `db` layer; maps between protobuf messages and DB structs. |
-
-### `internal/govpb` — generated bindings
-| File | Purpose |
-|------|---------|
-| `govpb/governance.pb.go`, `govpb/governance_grpc.pb.go` | **Generated** protobuf + gRPC code from `protos/governance.proto`. Do not edit by hand — regenerate (see below). |
-
 ### Other
 | Path | Purpose |
 |------|---------|
-| `protos/` | `.proto` service/message definitions. |
 | `.env.example` | Template for the runtime config (`.env` is gitignored — it holds secrets). |
 | `go.mod` / `go.sum` | Go module + dependency checksums. |
 
@@ -178,9 +189,9 @@ Same `fl_` convention as above.
 
 ## Data model (tables, auto-migrated)
 
-Output-owner and data-provider forms are **not** local tables anymore — APD is
-their store of record (`APD_URL`, see `db/apd_client.go`); this service just
-owns the struct shapes and forwards reads/writes over HTTP.
+Output-owner and data-provider forms are not local tables — aaa is their store
+of record; this service only keeps an in-memory cache of what aaa pushes it
+(see "Where forms live" above).
 
 - **`notifications`** — consent loop: `recipient_*`, `sender_username`, `message`,
   `payload` (JSONB, carries `kind`/`submission_id`/provider lists), `read`,
@@ -202,13 +213,13 @@ semantics, so this service's values win over any inherited shell variables.
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | REST API port | `8083` |
-| `GRPC_PORT` | gRPC port | `50052` |
 | `NODE_ENV` | Environment label | `development` |
 | `CORS_ORIGINS` | Comma-separated allowed origins | — |
 | `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` | PostgreSQL connection | `localhost`/`5432`/`p3dx_governance`/`postgres`/`postgres` |
 | `KEYCLOAK_BASE_URL`/`KEYCLOAK_REALM`/`KEYCLOAK_CLIENT_ID`/`KEYCLOAK_CLIENT_SECRET` | Service-account auth for receiver calls | — |
 | `PUSH_AUTH_TOKEN` | Legacy `X-Auth-Token` fallback when Keycloak is unset | — |
 | `OWNER_SELF_IPS` | Extra IPs treated as "this host" (rewritten to loopback so gov reaches a co-located receiver locally) | — |
+| `FORMS_PUSH_TOKEN` | Shared secret aaa must send as `X-Forms-Push-Token` on `/internal/forms/*`; blank skips the check | — |
 
 FL-orchestration paths/timeouts (`DISTRIBUTE_SCRIPT`, `PROVISION_TIMEOUT_MS`,
 `PUSH_TIMEOUT_MS`, `FL_SESSION_DELAY_MS`, `CLIENT_CONFIG_TEMPLATE`, …) keep the
@@ -222,16 +233,9 @@ All REST routes are mounted under **both** `/api/v1` and `/governance`.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/form-submissions` | Store an Output Owner form (upsert on `form_id`) |
-| `GET` | `/form-submissions` | List all submissions |
-| `GET` | `/form-submissions/export` | Download all submissions as JSON |
-| `GET` | `/form-submissions/:id` | Fetch one submission |
-| `DELETE` | `/form-submissions/:id` | Delete one submission |
 | `GET` | `/form-submissions/:id/report` | Download the combined FL session report |
 | `GET` | `/data-providers` | Mock provider list |
 | `POST` | `/send-provider-message` | Store a provider message |
-| `POST` | `/data-provider-forms` | Store a Data Provider form |
-| `GET` | `/data-provider-forms` | List Data Provider forms |
 | `POST` | `/notifications` | Create notifications for recipients |
 | `GET` | `/notifications/:username` | Fetch a user's notifications |
 | `GET` | `/notifications/by-sender/:username` | Notifications a user sent (owner's responses view) |
@@ -244,8 +248,14 @@ All REST routes are mounted under **both** `/api/v1` and `/governance`.
 | `GET` | `/client-config/by-submission/:id` | Owner-side rendered config download |
 | `GET` | `/client-config/:username` | Provider-side rendered config pull |
 
-**gRPC `GovernanceService`**: `SubmitForm`, `GetForm`, `GetAllForms`,
-`DeleteForm` (see `protos/governance.proto`).
+Separately, under `/internal/forms` (not part of `/api/v1`/`/governance`, no
+CORS, server-to-server only — see "Where forms live" above):
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/internal/forms/submissions` | aaa pushes an output-owner submission |
+| `DELETE` | `/internal/forms/submissions/:id` | aaa pushes a submission delete |
+| `POST` | `/internal/forms/provider-forms` | aaa pushes a data-provider form |
 
 ---
 
@@ -273,12 +283,3 @@ go build -o gov-layer ./cmd/server
 
 The repo's `../start.sh` launches the whole P3DX stack and starts this service
 with `go run ./cmd/server`.
-
-## Regenerating gRPC bindings
-
-```bash
-protoc -I protos \
-  --go_out=internal/govpb --go_opt=paths=source_relative,Mgovernance.proto=github.com/s4r4v4n04/p3dx_gov_layer/internal/govpb \
-  --go-grpc_out=internal/govpb --go-grpc_opt=paths=source_relative,Mgovernance.proto=github.com/s4r4v4n04/p3dx_gov_layer/internal/govpb \
-  governance.proto
-```
