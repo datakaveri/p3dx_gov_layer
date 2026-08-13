@@ -218,34 +218,108 @@ same names/defaults and can be overridden via the environment.
 
 ## API
 
-All REST routes are mounted under **both** `/api/v1` and `/governance`.
+All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS enabled, flexible origins).
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/form-submissions` | Store an Output Owner form (upsert on `form_id`) |
-| `GET` | `/form-submissions` | List all submissions |
-| `GET` | `/form-submissions/export` | Download all submissions as JSON |
-| `GET` | `/form-submissions/:id` | Fetch one submission |
-| `DELETE` | `/form-submissions/:id` | Delete one submission |
-| `GET` | `/form-submissions/:id/report` | Download the combined FL session report |
-| `GET` | `/data-providers` | Mock provider list |
-| `POST` | `/send-provider-message` | Store a provider message |
-| `POST` | `/data-provider-forms` | Store a Data Provider form |
-| `GET` | `/data-provider-forms` | List Data Provider forms |
-| `POST` | `/notifications` | Create notifications for recipients |
-| `GET` | `/notifications/:username` | Fetch a user's notifications |
-| `GET` | `/notifications/by-sender/:username` | Notifications a user sent (owner's responses view) |
-| `PATCH` | `/notifications/:id/read` | Mark a notification read |
-| `POST` | `/notifications/:id/respond` | Provider answers a request (`accepted`/`declined` + reason) |
-| `POST` | `/distribute-config` | scp client config to providers (`send_output_owner_config.sh`) |
-| `POST` | `/provision-env` | Provision a venv on each selected provider |
-| `POST` | `/push-config` | HTTP-push rendered `client_config.yaml` to providers |
-| `POST` | `/start-fl-session` | Bring up owner + providers and start the FL round |
-| `GET` | `/client-config/by-submission/:id` | Owner-side rendered config download |
-| `GET` | `/client-config/:username` | Provider-side rendered config pull |
+### Two Contract Pathways
 
-**gRPC `GovernanceService`**: `SubmitForm`, `GetForm`, `GetAllForms`,
-`DeleteForm` (see `protos/governance.proto`).
+The governance layer supports two distinct contract pathways:
+
+1. **FL Pathway** — Forms-based contract assembly with sequential orchestration
+2. **General Pathway** — Pre-built contracts with policy authorization and immediate TEE deployment
+
+### REST Endpoints
+
+#### Forms & Providers (FL-Specific)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/form-submissions` | Store an Output Owner FL config form (upsert on `form_id`) | FL |
+| `GET` | `/form-submissions` | List all form submissions | FL |
+| `GET` | `/form-submissions/export` | Download all submissions as JSON | FL |
+| `GET` | `/form-submissions/:id` | Fetch one form submission | FL |
+| `DELETE` | `/form-submissions/:id` | Delete one form submission | FL |
+| `GET` | `/data-providers` | List registered data providers | FL |
+| `POST` | `/send-provider-message` | Send a message to a data provider | FL |
+| `POST` | `/data-provider-forms` | Store a Data Provider registration form | FL |
+| `GET` | `/data-provider-forms` | List all data provider forms | FL |
+
+#### Notifications & Consent (FL-Specific)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/notifications` | Create participation-request notifications | FL |
+| `GET` | `/notifications/:username` | Fetch notifications for a user | FL |
+| `GET` | `/notifications/by-sender/:username` | Fetch notifications sent by a user | FL |
+| `PATCH` | `/notifications/:id/read` | Mark a notification as read | FL |
+| `POST` | `/notifications/:id/respond` | Provider responds to a notification (`accepted`/`declined` + reason) | FL |
+
+#### Contracts (Both Pathways)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/contracts` | Assemble contract from form submission data (draft or final) | FL |
+| `GET` | `/contracts/:sessionId` | Retrieve contract for a session | FL |
+| `POST` | `/contract` | Submit pre-built contract (validates token, verifies signature, authorizes via APD, signs with orchestrator key, deploys to TEE) | GENERAL |
+
+#### Reporting & Models
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `GET` | `/form-submissions/:id/report` | Download the combined FL session report (metrics, participants, training config) | FL |
+| `GET` | `/final-models` | List final (highest-round) models for all sessions | BOTH |
+| `GET` | `/final-model/download` | Download a final model checkpoint file (.pt or .weights) | BOTH |
+| `GET` | `/final-model/summary` | Get JSON summary of model architecture (layers, parameters, etc.) | BOTH |
+
+#### FL Orchestration (FL-Specific)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/distribute-config` | Distribute client_config.yaml to providers via SCP | FL |
+| `POST` | `/provision-env` | Provision Python virtual environments on selected providers | FL |
+| `POST` | `/push-config` | HTTP-push rendered client_config.yaml to providers | FL |
+| `POST` | `/start-fl-session` | Complete FL orchestration in one call: owner env → server → provider envs → config → clients → session | FL |
+| `GET` | `/client-config/by-submission/:id` | Retrieve rendered client config for a form submission | FL |
+| `GET` | `/client-config/:username` | Retrieve rendered client config for a provider (pulled during setup) | FL |
+
+#### Internal Endpoints (Server-to-Server, Not Public)
+
+These are called by AAA (authentication & authorization service) to push form updates into the governance layer's local cache. **Not accessible via `/api/v1` or `/governance`.**
+
+| Method | Path | Purpose | Access |
+|--------|------|---------|--------|
+| `POST` | `/internal/forms/submissions` | Ingest form submission from AAA (store of record) | Internal only |
+| `DELETE` | `/internal/forms/submissions/:id` | Delete form submission from local cache | Internal only |
+| `POST` | `/internal/forms/provider-forms` | Ingest data provider form from AAA | Internal only |
+
+### gRPC API
+
+**Service**: `GovernanceService` (port `50052`; see `protos/governance.proto`)
+
+| Method | Request | Response | Purpose |
+|--------|---------|----------|---------|
+| `SubmitForm` | `FormSubmission` | `SubmissionResponse` | Create a form submission |
+| `GetForm` | `GetFormRequest` | `FormSubmission` | Retrieve a form by ID |
+| `GetAllForms` | `GetAllFormsRequest` | `GetAllFormsResponse` | List all forms |
+| `DeleteForm` | `DeleteFormRequest` | `DeleteResponse` | Delete a form by ID |
+
+### Contract Pathway Details
+
+**FL Pathway Flow:**
+1. Create form submission (owner config + selected providers)
+2. Build initial contract (particiption request, `finalize=false`)
+3. Send notifications to providers
+4. Wait for provider responses
+5. Build final contract (confirmed roster, `finalize=true`)
+6. Orchestrate: distribute config → provision envs → push config → start clients → start session
+7. Retrieve final models and report
+
+**General Pathway Flow:**
+1. Build contract externally (arbitrary `compute_choice`, `execution_platform`)
+2. Get user's Keycloak token
+3. Sign contract with user's private key
+4. POST to `/contract` with signed contract
+5. Governance layer validates token, verifies signature, authorizes against APD policies, stores securely, signs with orchestrator key, deploys to TEE immediately
+6. Retrieve results from TEE (outside governance layer scope)
 
 ---
 
