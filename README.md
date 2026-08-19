@@ -1,74 +1,81 @@
 # P3DX Governance Layer (Go)
 
-The **Governance Layer** is the coordination brain of the P3DX federated-learning
-(FL) system. It manages participation consent and contracts between output owners
-and data providers. Forms are created and stored in **aaa** (the FL form UI backend)
-and also persisted in **APD** (Access Policy Database).
+The **Governance Layer** is the coordination brain of the P3DX system. It receives
+contracts specifying a technique (FL, TEE, or SMPC) and selected datasets, fetches
+the necessary forms/policies from **APD** (Authorization Policy Database), authorizes
+requests, and orchestrates execution.
 
-It speaks **REST** to the UI and aaa, and it is backed by a **PostgreSQL**
-database (`p3dx_governance`).
+It speaks **REST** and is backed by a **PostgreSQL** database (`p3dx_governance`).
 
-> Ported from an original Node.js implementation to Go as a **drop-in
-> replacement**: identical REST endpoints, JSON shapes, status codes, the
-> same `.env`, and the same `p3dx_governance` database. The Node sources have
-> since been removed — this repo is Go-only. Form storage has moved to aaa and
-> APD; form orchestration has been removed from this service.
+> Drop-in Go replacement for the original Node.js implementation: identical REST
+> endpoints, JSON shapes, status codes, and database schema. Go-only; Node sources
+> removed. Contract model unified: single endpoint routes to FL, TEE, or SMPC
+> orchestration based on technique field.
 
 ---
 
 ## What the Governance Layer is used for
 
-- **Participation selection & consent** — records which providers an owner
-  selected, and carries the notification loop: owner invites → provider
-  accepts/declines (with a reason) → owner sees the responses → owner sends a
-  final roster.
-- **Contract management** — assembles and stores contracts for FL sessions.
+- **Contract intake** — receives contracts with technique (FL/TEE/SMPC) and datasets
+- **Form/Policy lookup** — fetches forms (FL pathway) or policies (General pathway) from APD
+- **Authorization** — validates user tokens and authorizes against dataset policies
+- **Contract storage** — persists contracts for audit trail
+- **Orchestration routing** — routes to appropriate executor (FL receiver, TEE, SMPC network)
+- **Notifications** — manages participation consent loop (FL pathway)
 
 ---
 
 ## Where it sits (architecture)
 
 ```
-        ┌─────────────┐        ┌──────────────┐        ┌─────────┐
-        │  UI (React) │        │     aaa      │        │   APD   │
-        └──────┬──────┘        └──────┬───────┘        └────┬────┘
-               │ HTTP             │ forms created/      │ forms
-               │                  │ stored here         │ persisted
-               ▼                  ▼                     ▼
-        ┌──────────────────────────────────────────────────────────┐
-        │     Governance Layer (this repo)                          │
-        │        REST :8083 (UI, contracts, notifications)          │
-        └──────────────────────────────────────────────────────────┘
-                 │
-                 ▼
-           PostgreSQL
-        (p3dx_governance)
+        ┌─────────────┐        ┌────────────────┐        ┌──────────┐
+        │  Clients    │        │     APD        │        │ Keycloak │
+        │ (FL Owner,  │        │  (Forms,       │        │   (Auth) │
+        │  SMPC Node) │        │   Policies)    │        │          │
+        └──────┬──────┘        └────────┬───────┘        └────┬─────┘
+               │                        │                     │
+               │  POST /contract        │                     │
+               │  (technique, datasets) │                     │
+               └─────────┬──────────────┴─────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────────────┐
+        │   Governance Layer (this repo)              │
+        │   REST :8083 (contracts, notifications)     │
+        │   - Routes by technique (FL/TEE/SMPC)       │
+        │   - Fetches forms/policies from APD         │
+        │   - Authorizes against policies             │
+        └────┬──────────────┬──────────────┬──────────┘
+             │              │              │
+             ▼              ▼              ▼
+        PostgreSQL     FL Receivers   TEE/SMPC
+        (contracts,    (orchest.      Executors
+        notif.)        :8090/:8080)   (outside)
 ```
-
-- **REST API** — port `8083` in code, set to `8084` in `.env`; used by the UI
-  and aaa. Every route is mounted under **both** `/api/v1` and `/governance`.
-- **PostgreSQL** — `p3dx_governance`; schema auto-created/migrated on startup
-  (notifications, session_reports, contracts tables).
-- **APD** — Access Policy Database where forms are persisted in PostgreSQL.
 
 ---
 
-## Participation & Consent Flow
+## Contract Processing Flow
 
-1. **Forms submitted** — Output Owners and Data Providers submit their forms to
-   **aaa** (the FL form UI backend). aaa stores forms in immudb and also sends
-   them to **APD** for persistence and policy checks.
+**Single endpoint: `POST /contract`**
 
-2. **Consent loop (notifications)**
-   - Owner invites selected providers (`POST /notifications`, kind
-     `participation_request`) — lists requested vs selected providers.
-   - Each provider answers (`POST /notifications/:id/respond`) with
-     `accepted`/`declined` plus an optional reason.
-   - Owner reviews answers (`GET /notifications/by-sender/:username`) and can send
-     a final roster (a second `participation_roster` notification).
+Contract includes: `technique` ("FL" | "TEE" | "SMPC"), `datasets` ([{id, name}, ...])
 
-3. **Contract management** — contracts are assembled and stored for record-keeping
-   (`POST /contracts`, `GET /contracts/:sessionId`).
+**FL Pathway** (technique = "FL")
+1. Extract datasets from contract
+2. Fetch forms from APD for each dataset
+3. Store contract in DB (pathway="FL")
+4. Return 202 Accepted — FL orchestration via separate flow
+
+**General Pathway** (technique = "TEE" or "SMPC")
+1. Extract datasets from contract
+2. Fetch policies from APD for each dataset
+3. Authorize user against each dataset's policy
+4. Encrypt contract to disk
+5. Store contract in DB (pathway="GENERAL")
+6. Sign with orchestrator key
+7. Deploy to TEE/SMPC executor
+8. Return contract ID + orchestrator signature
 
 ---
 
@@ -100,11 +107,20 @@ database (`p3dx_governance`).
 ### `internal/httpapi` — REST API
 | File | Purpose |
 |------|---------|
-| `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts **every** route under both `/api/v1` and `/governance`. Holds the `Server` (config + DB + Keycloak). |
-| `httpapi/fl_forms.go` | Request handlers for the mock provider directory and provider messages. |
+| `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts every route under both `/api/v1` and `/governance`. Holds the `Server` (config + DB + Keycloak). |
+| `httpapi/general_contract.go` | `POST /contract` — unified contract endpoint for FL/TEE/SMPC. Routes by technique, fetches forms/policies from APD, authorizes, and orchestrates accordingly. |
 | `httpapi/fl_notifications.go` | Request handlers for notifications (create / list / read / **respond** / **by-sender**). |
-| `httpapi/contracts.go` | `POST /contracts` / `GET /contracts/{sessionId}` — assembles and stores the per-session contract. |
-| `httpapi/model.go`, `httpapi/inspect_model.py` | `GET /final-models`, `/final-model/download`, `/final-model/summary` — locates flo_server's per-round checkpoints in `CHECKPOINT_DIR` and summarises the highest-round one via the embedded, torch-free `.pt` reader script. |
+| `httpapi/fl_forms.go` | Request handlers for mock provider directory and provider messages. |
+| `httpapi/model.go`, `httpapi/inspect_model.py` | `GET /final-models`, `/final-model/download`, `/final-model/summary` — locates and summarizes flo_server's final model checkpoints via embedded `.pt` reader. |
+
+### `internal/services` — Business logic
+| File | Purpose |
+|------|---------|
+| `services/apd.go` | APD integration: `FetchDatasetForm()` for FL, `AuthorizeContractAgainstAPD()` for General pathway, policy evaluation, private dataset email notifications. |
+| `services/token.go` | Keycloak token validation via JWKS, claim extraction. |
+| `services/crypto.go` | RSA signature verification and signing operations. |
+| `services/storage.go` | `SecureStore()` — AES-GCM encryption of contracts to disk. |
+| `services/enclave.go` | `DeployEnclave()` — HTTP POST of signed contracts to TEE/SMPC executor. |
 
 ### `internal/keycloak` — optional service-account auth
 | File | Purpose |
@@ -139,12 +155,28 @@ semantics, so this service's values win over any inherited shell variables.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| **Server** |
 | `PORT` | REST API port | `8083` |
 | `NODE_ENV` | Environment label | `development` |
 | `CORS_ORIGINS` | Comma-separated allowed origins | — |
-| `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER`/`DB_PASSWORD` | PostgreSQL connection | `localhost`/`5432`/`p3dx_governance`/`postgres`/`postgres` |
-| `KEYCLOAK_BASE_URL`/`KEYCLOAK_REALM`/`KEYCLOAK_CLIENT_ID`/`KEYCLOAK_CLIENT_SECRET` | Keycloak service-account auth (optional) | — |
+| **Database** |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | PostgreSQL connection | `localhost` / `5432` / `p3dx_governance` / `postgres` / `postgres` |
+| **Authentication** |
+| `KEYCLOAK_BASE_URL` / `KEYCLOAK_REALM` / `KEYCLOAK_CLIENT_ID` / `KEYCLOAK_CLIENT_SECRET` | Keycloak service-account auth | — |
 | `PUSH_AUTH_TOKEN` | Legacy `X-Auth-Token` fallback when Keycloak is unset | — |
+| **APD (Authorization Policy Database)** |
+| `APD_BASE_URL` | APD service URL for fetching forms/policies | `http://localhost:8091` |
+| `APD_POLICY_PATH_TEMPLATE` | Custom template for policy paths (supports `{provider_id}`, `{policy_id}`) | — |
+| `APD_FORM_PATH_TEMPLATE` | Custom template for form paths (supports `{dataset_id}`) | — |
+| **General Pathway (TEE/SMPC)** |
+| `ORCH_PRIVATE_KEY` | Path to orchestrator private key file | — |
+| `STORE_KEY` | Encryption key for secure contract storage | — |
+| `STORE_PATH` | Directory for encrypted contracts | — |
+| **Private Dataset Notifications** |
+| `SMTP_HOST` | SMTP server hostname | — |
+| `SMTP_PORT` | SMTP server port | `587` |
+| `SENDER_EMAIL` | Email address for notifications | — |
+| `SENDER_PASSWORD` | SMTP password (app password for Gmail) | — |
 
 ---
 
@@ -152,54 +184,59 @@ semantics, so this service's values win over any inherited shell variables.
 
 All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS enabled, flexible origins).
 
-### Two Contract Pathways
+### Contract Endpoint (Unified)
 
-The governance layer supports two distinct contract pathways:
+**Single endpoint for all techniques:**
 
-1. **FL Pathway** — Forms-based contract assembly with sequential orchestration
-2. **General Pathway** — Pre-built contracts with policy authorization and immediate TEE deployment
+| Method | Path | Purpose | Input |
+|--------|------|---------|-------|
+| `POST` | `/contract` | Submit contract with technique (FL/TEE/SMPC) and datasets | `{access_token, contract, signature}` |
+| `GET` | `/contract/{sessionId}` | Retrieve stored contract | — |
 
-### REST Endpoints
+**Contract Request Format:**
+```json
+{
+  "access_token": "...",
+  "contract": {
+    "technique": "FL|TEE|SMPC",
+    "datasets": [
+      { "id": "dataset-1", "name": "...", "provider_id": "..." },
+      { "id": "dataset-2", "name": "...", "provider_id": "..." }
+    ],
+    ...
+  },
+  "signature": "hex-encoded-user-signature"
+}
+```
 
-#### Forms & Providers (FL-Specific)
+**Processing:**
+- **FL pathway** (technique="FL"): Fetches forms from APD, stores contract (202 Accepted)
+- **General pathway** (technique="TEE"/"SMPC"): Fetches policies from APD, authorizes, encrypts, signs, deploys (200 OK)
 
-Output-owner and data-provider forms are created and stored entirely in **aaa**
-(immudb) — this service has no form CRUD endpoints. What it does have:
+### Notifications & Consent (FL-Specific)
 
-| Method | Path | Purpose | Pathway |
-|--------|------|---------|---------|
-| `POST` | `/internal/forms/submissions` | aaa pushes an output-owner submission | Internal |
-| `DELETE` | `/internal/forms/submissions/:id` | aaa pushes a submission delete | Internal |
-| `POST` | `/internal/forms/provider-forms` | aaa pushes a data-provider form | Internal |
-| `GET` | `/data-providers` | List registered data providers | FL |
-| `POST` | `/send-provider-message` | Send a message to a data provider | FL |
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/notifications` | Create participation-request notifications |
+| `GET` | `/notifications/{key}` | Fetch notifications for a user |
+| `GET` | `/notifications/by-sender/{key}` | Fetch notifications sent by a user |
+| `PATCH` | `/notifications/{key}/read` | Mark notification as read |
+| `POST` | `/notifications/{key}/respond` | Provider responds (accepted/declined + reason) |
 
-#### Notifications & Consent (FL-Specific)
+### Data Providers & Messages
 
-| Method | Path | Purpose | Pathway |
-|--------|------|---------|---------|
-| `POST` | `/notifications` | Create participation-request notifications | FL |
-| `GET` | `/notifications/:username` | Fetch notifications for a user | FL |
-| `GET` | `/notifications/by-sender/:username` | Fetch notifications sent by a user | FL |
-| `PATCH` | `/notifications/:id/read` | Mark a notification as read | FL |
-| `POST` | `/notifications/:id/respond` | Provider responds to a notification (`accepted`/`declined` + reason) | FL |
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/data-providers` | List registered data providers |
+| `POST` | `/send-provider-message` | Send message to a data provider |
 
-#### Contracts (Both Pathways)
+### Final Models
 
-| Method | Path | Purpose | Pathway |
-|--------|------|---------|---------|
-| `POST` | `/contracts` | Assemble contract from form submission data (draft or final) | FL |
-| `GET` | `/contracts/:sessionId` | Retrieve contract for a session | FL |
-| `POST` | `/contract` | Submit pre-built contract (validates token, verifies signature, authorizes via APD, signs with orchestrator key, deploys to TEE) | GENERAL |
-
-#### Reporting & Models
-
-| Method | Path | Purpose | Pathway |
-|--------|------|---------|---------|
-| `GET` | `/form-submissions/:id/report` | Download the combined FL session report (metrics, participants, training config) | FL |
-| `GET` | `/final-models` | List final (highest-round) models for all sessions | BOTH |
-| `GET` | `/final-model/download` | Download a final model checkpoint file (.pt or .weights) | BOTH |
-| `GET` | `/final-model/summary` | Get JSON summary of model architecture (layers, parameters, etc.) | BOTH |
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/final-models` | List final (highest-round) models for all sessions |
+| `GET` | `/final-model/download` | Download model checkpoint file |
+| `GET` | `/final-model/summary` | Get model architecture summary |
 
 #### FL Orchestration (FL-Specific)
 

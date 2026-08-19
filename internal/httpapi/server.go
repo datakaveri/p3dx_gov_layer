@@ -28,27 +28,21 @@ const maxBodyBytes = 5 * 1024 * 1024
 
 // Server bundles the dependencies shared by every handler.
 type Server struct {
-	cfg  *config.Config
-	db   *db.DB
-	kc   *keycloak.Client
-	self *selfIPs
+	cfg *config.Config
+	db  *db.DB
+	kc  *keycloak.Client
 	http *http.Client
 }
 
-// New builds the Server and kicks off best-effort public-IP discovery (so a
-// public IP entered on a form is recognised as "self" — see selfIPs).
+// New builds the Server.
 func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
-	s := &Server{
-		cfg:  cfg,
-		db:   database,
-		kc:   kc,
-		self: newSelfIPs(cfg.OwnerSelfIPs),
-		// No client-level timeout: each outbound call sets its own via context,
-		// matching the per-call AbortSignal.timeout(...) values in the Node code.
+	return &Server{
+		cfg: cfg,
+		db:  database,
+		kc:  kc,
+		// No client-level timeout: each outbound call sets its own via context.
 		http: &http.Client{},
 	}
-	s.self.discoverPublicIPAsync()
-	return s
 }
 
 // Handler returns the root http.Handler with CORS + the routes mounted at both
@@ -64,11 +58,6 @@ func (s *Server) Handler() http.Handler {
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
 func (s *Server) registerRoutes(r chi.Router) {
-	// forms live entirely in aaa now — no form CRUD is exposed here. The
-	// session report is a derived feature (not the form itself), so it stays;
-	// it reads form data internally from aaa via the db package.
-	r.Get("/form-submissions/{id}/report", s.getSessionReport) // fl_report.go
-
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
 
@@ -79,13 +68,10 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Patch("/notifications/{key}/read", s.patchNotificationRead)
 	r.Post("/notifications/{key}/respond", s.respondToNotification)
 
-	// Two contract pathways:
-	// 1. FL pathway: POST /contracts (forms-based assembly) — contracts.go
-	r.Post("/contracts", s.postContract)
-	r.Get("/contracts/{sessionId}", s.getContract)
-
-	// 2. General pathway: POST /contract (pre-built with policy checks) — general_contract.go
+	// Single contract endpoint for both pathways:
+	// Routes to FL, TEE, or SMPC orchestration based on technique field
 	r.Post("/contract", s.handleContract)
+	r.Get("/contract/{sessionId}", s.getContract)
 
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
