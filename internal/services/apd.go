@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 // AuthorizeContractAgainstAPD fetches the data provider policy from APD
 // and evaluates whether the caller claims satisfy that policy.
+// If the dataset is private, sends a notification email to the data provider.
 func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.MapClaims) (bool, error) {
 	providerID, policyID, action := extractProviderContext(contract)
 	if providerID == "" {
@@ -22,6 +24,18 @@ func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.Map
 	policy, err := fetchProviderPolicy(providerID, policyID)
 	if err != nil {
 		return false, err
+	}
+
+	// Check if dataset is private and send approval request email
+	if isPrivateDataset(policy) {
+		providerEmail := stringValue(policy, "provider_email", "email", "contact_email")
+		providerName := stringValue(policy, "provider_name", "name")
+
+		if providerEmail != "" {
+			if err := sendPrivateDatasetApprovalEmail(providerEmail, providerName, contract); err != nil {
+				fmt.Printf("[APD] Warning: Failed to send private dataset approval email to %s: %v\n", providerEmail, err)
+			}
+		}
 	}
 
 	return evaluatePolicy(policy, claims, action), nil
@@ -69,6 +83,62 @@ func fetchProviderPolicy(providerID, policyID string) (map[string]interface{}, e
 	}
 
 	return nil, fmt.Errorf("no policy found in APD for provider %q", providerID)
+}
+
+func isPrivateDataset(policy map[string]interface{}) bool {
+	// Check common field names for privacy designation
+	if isPrivate, ok := policy["is_private"].(bool); ok {
+		return isPrivate
+	}
+	if isPrivate, ok := policy["private"].(bool); ok {
+		return isPrivate
+	}
+	if isPrivate, ok := policy["visibility"].(string); ok {
+		return isPrivate == "private"
+	}
+	return false
+}
+
+func sendPrivateDatasetApprovalEmail(recipientEmail, providerName string, contract map[string]interface{}) error {
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPort := os.Getenv("SMTP_PORT")
+	senderEmail := os.Getenv("SENDER_EMAIL")
+	senderPassword := os.Getenv("SENDER_PASSWORD")
+
+	if smtpHost == "" || smtpPort == "" || senderEmail == "" {
+		return fmt.Errorf("SMTP configuration not set")
+	}
+
+	subject := "Manual Approval Required: Private Dataset Access Request"
+	contractJSON, _ := json.MarshalIndent(contract, "", "  ")
+
+	body := fmt.Sprintf(`Hello %s,
+
+A user has requested access to your private dataset via the governance layer.
+
+Please review the contract details below and approve or deny the request manually.
+
+Contract Details:
+%s
+
+To approve, please log in to the governance platform and provide your approval.
+
+Best regards,
+P3DX Governance Layer`,
+		providerName, string(contractJSON))
+
+	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
+		senderEmail, recipientEmail, subject, body)
+
+	addr := smtpHost + ":" + smtpPort
+	auth := smtp.PlainAuth("", senderEmail, senderPassword, smtpHost)
+
+	err := smtp.SendMail(addr, auth, senderEmail, []string{recipientEmail}, []byte(message))
+	if err != nil {
+		return fmt.Errorf("send email: %w", err)
+	}
+
+	return nil
 }
 
 func buildPolicyPaths(providerID, policyID string) []string {
