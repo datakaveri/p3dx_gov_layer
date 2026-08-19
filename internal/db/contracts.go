@@ -157,9 +157,9 @@ func (d *DB) existingContractID(ctx context.Context, sessionID string) string {
 	return cid
 }
 
-// BuildContract assembles a contract for the given submission (session), owner
-// Keycloak id and selected providers, filling each provider's dataset fields from
-// their latest form. It reuses an already-assigned project_id and contract_id for
+// BuildContract assembles a contract for the given submission session ID and parties.
+// Since forms are now stored in APD only, dataset fields from provider forms are
+// left blank. It reuses an already-assigned project_id and contract_id for
 // the session so only the parties change between the initial and final contracts.
 // finalize sets version=2 (the final roster contract) vs. version=1 (the draft).
 // pathway indicates whether this is an FL contract (with forms flow) or GENERAL (with policy checks).
@@ -167,38 +167,8 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	if pathway == "" {
 		pathway = "FL"
 	}
-	sub, err := d.GetFormSubmissionByID(ctx, submissionID)
-	if err != nil {
-		return nil, err
-	}
-	if sub == nil {
-		return nil, pgx.ErrNoRows
-	}
 
-	// Owner id falls back to the username when no Keycloak id was supplied.
-	if ownerUserID == "" {
-		ownerUserID = sub.OutputOwnerID
-	}
-
-	// Look up each selected provider's latest form for the dataset fields.
-	usernames := make([]string, 0, len(parties))
-	for _, p := range parties {
-		if p.Username != "" {
-			usernames = append(usernames, p.Username)
-		}
-	}
-	forms, err := d.GetDataProviderFormsByUsernames(ctx, usernames)
-	if err != nil {
-		return nil, err
-	}
-	byUser := make(map[string]*DataProviderForm, len(forms))
-	for i := range forms {
-		f := &forms[i]
-		if f.DataOwnerID != nil {
-			byUser[*f.DataOwnerID] = f
-		}
-	}
-
+	// Build parties without form data (forms now live in APD only).
 	// party_1..party_N: one DATA_PROVIDER per selected provider.
 	partiesMap := make(map[string]any, len(parties)+1)
 	idx := 1
@@ -209,36 +179,28 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 			Name:        p.Username,
 			Constraints: PartyConstraints{RestrictedTo: []string{}},
 		}
-		if f := byUser[p.Username]; f != nil {
-			if f.DataResource != nil {
-				dp.DataResourceID = *f.DataResource
-			}
-			if f.DataSizeBytes != nil {
-				dp.DataSizeBytes = int64(*f.DataSizeBytes)
-			}
-		}
 		partiesMap[fmt.Sprintf("party_%d", idx)] = dp
 		idx++
 	}
 
 	// Final party: the drafting party (the output owner).
-	var ownerRAM int32
-	if sub.RAMUsage != nil {
-		ownerRAM = *sub.RAMUsage
+	// Use ownerUserID if provided, otherwise fall back to username.
+	if ownerUserID == "" {
+		ownerUserID = submissionID
 	}
 	partiesMap[fmt.Sprintf("party_%d", idx)] = DraftingParty{
 		ID:               ownerUserID,
 		Role:             "DRAFTING_PARTY",
-		Name:             sub.OutputOwnerID,
-		RAMUsageMB:       ownerRAM,
+		Name:             ownerUserID,
+		RAMUsageMB:       0,
 		UsageConstraints: UsageConstraints{},
 	}
 
-	projectID := d.existingProjectID(ctx, sub.ID)
+	projectID := d.existingProjectID(ctx, submissionID)
 	if projectID == "" {
 		projectID = newID("proj", 9)
 	}
-	contractID := d.existingContractID(ctx, sub.ID)
+	contractID := d.existingContractID(ctx, submissionID)
 	if contractID == "" {
 		contractID = newUUID()
 	}
@@ -248,7 +210,6 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	}
 
 	now := time.Now().UTC()
-	filled := sub.Filled != nil && *sub.Filled
 
 	return &Contract{
 		ProjectID:   projectID,
@@ -264,21 +225,21 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		ExecutionPlatform: "AZURE_AMD_SEV",
 		Parties:           partiesMap,
 		SessionInfo: SessionInfo{
-			ID:            sub.ID,
-			FormID:        sub.FormID,
-			SessionID:     sub.ID,
-			RequestedBy:   sub.RequestedBy,
-			OutputOwnerID: sub.OutputOwnerID,
-			Filled:        filled,
+			ID:            submissionID,
+			FormID:        "",
+			SessionID:     submissionID,
+			RequestedBy:   "",
+			OutputOwnerID: ownerUserID,
+			Filled:        true,
 			TrainingConfig: TrainingConfig{
-				NumServerRounds:  sub.NumServerRounds,
-				FractionEvaluate: sub.FractionEvaluate,
-				LocalEpochs:      sub.LocalEpochs,
-				LearningRate:     sub.LearningRate,
-				BatchSize:        sub.BatchSize,
-				Model:            sub.Model,
-				Framework:        sub.Framework,
-				Components:       jsonbOr(sub.Components, "{}"),
+				NumServerRounds:  nil,
+				FractionEvaluate: nil,
+				LocalEpochs:      nil,
+				LearningRate:     nil,
+				BatchSize:        nil,
+				Model:            nil,
+				Framework:        nil,
+				Components:       "{}",
 			},
 		},
 		Signatures: map[string]any{},
