@@ -150,24 +150,87 @@ semantics, so this service's values win over any inherited shell variables.
 
 ## API
 
-All REST routes are mounted under **both** `/api/v1` and `/governance`.
+All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS enabled, flexible origins).
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/data-providers` | Mock provider list |
-| `POST` | `/send-provider-message` | Store a provider message |
-| `POST` | `/notifications` | Create notifications for recipients |
-| `GET` | `/notifications/:username` | Fetch a user's notifications |
-| `GET` | `/notifications/by-sender/:username` | Notifications a user sent (owner's responses view) |
-| `PATCH` | `/notifications/:id/read` | Mark a notification read |
-| `POST` | `/notifications/:id/respond` | Provider answers a request (`accepted`/`declined` + reason) |
-| `POST` | `/contracts` | Assemble and store a contract for a session |
-| `GET` | `/contracts/:sessionId` | Retrieve a contract by session |
-| `GET` | `/final-models` | List final models |
-| `GET` | `/final-model/download` | Download a final model |
-| `GET` | `/final-model/summary` | Summarize a final model |
+### Two Contract Pathways
+
+The governance layer supports two distinct contract pathways:
+
+1. **FL Pathway** — Forms-based contract assembly with sequential orchestration
+2. **General Pathway** — Pre-built contracts with policy authorization and immediate TEE deployment
+
+### REST Endpoints
+
+#### Forms & Providers (FL-Specific)
+
+Output-owner and data-provider forms are created and stored entirely in **aaa**
+(immudb) — this service has no form CRUD endpoints. What it does have:
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/internal/forms/submissions` | aaa pushes an output-owner submission | Internal |
+| `DELETE` | `/internal/forms/submissions/:id` | aaa pushes a submission delete | Internal |
+| `POST` | `/internal/forms/provider-forms` | aaa pushes a data-provider form | Internal |
+| `GET` | `/data-providers` | List registered data providers | FL |
+| `POST` | `/send-provider-message` | Send a message to a data provider | FL |
+
+#### Notifications & Consent (FL-Specific)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/notifications` | Create participation-request notifications | FL |
+| `GET` | `/notifications/:username` | Fetch notifications for a user | FL |
+| `GET` | `/notifications/by-sender/:username` | Fetch notifications sent by a user | FL |
+| `PATCH` | `/notifications/:id/read` | Mark a notification as read | FL |
+| `POST` | `/notifications/:id/respond` | Provider responds to a notification (`accepted`/`declined` + reason) | FL |
+
+#### Contracts (Both Pathways)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/contracts` | Assemble contract from form submission data (draft or final) | FL |
+| `GET` | `/contracts/:sessionId` | Retrieve contract for a session | FL |
+| `POST` | `/contract` | Submit pre-built contract (validates token, verifies signature, authorizes via APD, signs with orchestrator key, deploys to TEE) | GENERAL |
+
+#### Reporting & Models
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `GET` | `/form-submissions/:id/report` | Download the combined FL session report (metrics, participants, training config) | FL |
+| `GET` | `/final-models` | List final (highest-round) models for all sessions | BOTH |
+| `GET` | `/final-model/download` | Download a final model checkpoint file (.pt or .weights) | BOTH |
+| `GET` | `/final-model/summary` | Get JSON summary of model architecture (layers, parameters, etc.) | BOTH |
+
+#### FL Orchestration (FL-Specific)
+
+| Method | Path | Purpose | Pathway |
+|--------|------|---------|---------|
+| `POST` | `/distribute-config` | Distribute client_config.yaml to providers via SCP | FL |
+| `POST` | `/provision-env` | Provision Python virtual environments on selected providers | FL |
+| `POST` | `/push-config` | HTTP-push rendered client_config.yaml to providers | FL |
+| `POST` | `/start-fl-session` | Complete FL orchestration in one call: owner env → server → provider envs → config → clients → session | FL |
+| `GET` | `/client-config/by-submission/:id` | Retrieve rendered client config for a form submission | FL |
+| `GET` | `/client-config/:username` | Retrieve rendered client config for a provider (pulled during setup) | FL |
+
+### Contract Pathway Details
+
+**FL Pathway Flow:**
+1. Create form submission via aaa (owner config + selected providers)
+2. aaa pushes form to governance layer
+3. Build initial contract (participation request, `finalize=false`)
+4. Send notifications to providers
+5. Wait for provider responses
+6. Build final contract (confirmed roster, `finalize=true`)
+7. Orchestrate: distribute config → provision envs → push config → start clients → start session
+8. Retrieve final models and report
+
+**General Pathway Flow:**
+1. Build contract externally (arbitrary `compute_choice`, `execution_platform`)
+2. Get user's Keycloak token
+3. Sign contract with user's private key
+4. POST to `/contract` with signed contract
+5. Governance layer validates token, verifies signature, authorizes against APD policies, stores securely, signs with orchestrator key, deploys to TEE immediately
+6. Retrieve results from TEE (outside governance layer scope)
 
 ---
 
