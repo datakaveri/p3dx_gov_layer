@@ -1,9 +1,6 @@
 package httpapi
 
 // This file is FL-only: the mock provider directory and provider messaging.
-// Forms (output-owner submissions and data-provider forms) live entirely in
-// aaa now — no form CRUD is exposed here; see forms_ingest.go and
-// db/forms_cache.go for how orchestration/reports still get form data.
 
 import (
 	"log"
