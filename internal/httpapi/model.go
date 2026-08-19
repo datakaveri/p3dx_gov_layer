@@ -27,6 +27,17 @@ var inspectModelPy string
 //	model_<session_id>_round_<N>.pt   (or .weights for non-pytorch backends)
 var modelFileRe = regexp.MustCompile(`^model_(.+)_round_(\d+)\.(pt|weights)$`)
 
+// safeID matches valid session/model identifiers (alphanumeric + dashes/underscores)
+var safeID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// clip truncates a string to max length
+func clip(s string, max int) string {
+	if len(s) > max {
+		return s[:max]
+	}
+	return s
+}
+
 // finalModel describes the final (highest-round) global model for one FL session.
 type finalModel struct {
 	SessionID  string `json:"session_id"`

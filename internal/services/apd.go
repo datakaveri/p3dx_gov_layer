@@ -12,13 +12,13 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// AuthorizeContractAgainstAPD fetches the data provider policy from APD
+// AuthorizeContractAgainstAPD fetches the data provider policy from APD for a specific dataset
 // and evaluates whether the caller claims satisfy that policy.
 // If the dataset is private, sends a notification email to the data provider.
-func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.MapClaims) (bool, error) {
-	providerID, policyID, action := extractProviderContext(contract)
+func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.MapClaims, datasetID string) (bool, error) {
+	providerID, policyID, action := extractProviderContext(contract, datasetID)
 	if providerID == "" {
-		return false, fmt.Errorf("contract missing data provider details")
+		return false, fmt.Errorf("contract missing data provider details for dataset %s", datasetID)
 	}
 
 	policy, err := fetchProviderPolicy(providerID, policyID)
@@ -39,6 +39,70 @@ func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.Map
 	}
 
 	return evaluatePolicy(policy, claims, action), nil
+}
+
+// FetchDatasetForm fetches the form/metadata for a dataset from APD (FL pathway)
+func FetchDatasetForm(datasetID string) (map[string]interface{}, error) {
+	baseURL := strings.TrimRight(os.Getenv("APD_BASE_URL"), "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("APD_BASE_URL not set")
+	}
+
+	paths := buildFormPaths(datasetID)
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no APD form path candidates")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, p := range paths {
+		u := baseURL + p
+		resp, err := client.Get(u)
+		if err != nil {
+			continue
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+
+		var response map[string]interface{}
+		err = json.NewDecoder(resp.Body).Decode(&response)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+
+		data, ok := response["data"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		return data, nil
+	}
+
+	return nil, fmt.Errorf("no form found in APD for dataset %q", datasetID)
+}
+
+func buildFormPaths(datasetID string) []string {
+	template := strings.TrimSpace(os.Getenv("APD_FORM_PATH_TEMPLATE"))
+	if template != "" {
+		path := strings.ReplaceAll(template, "{dataset_id}", datasetID)
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		return []string{path}
+	}
+
+	paths := make([]string, 0, 2)
+	if datasetID != "" {
+		paths = append(paths, "/api/v1/form/dataset/"+datasetID)
+		paths = append(paths, "/api/v1/forms/"+datasetID)
+	}
+	return paths
 }
 
 func fetchProviderPolicy(providerID, policyID string) (map[string]interface{}, error) {
@@ -162,9 +226,32 @@ func buildPolicyPaths(providerID, policyID string) []string {
 	return paths
 }
 
-func extractProviderContext(contract map[string]interface{}) (providerID, policyID, action string) {
-	providerID = stringValue(contract, "data_provider_id", "provider_id")
-	policyID = stringValue(contract, "policy_id", "data_provider_policy_id")
+func extractProviderContext(contract map[string]interface{}, datasetID string) (providerID, policyID, action string) {
+	// First try to find provider info for the specific dataset
+	if datasets, ok := contract["datasets"].([]interface{}); ok {
+		for _, d := range datasets {
+			if dMap, ok := d.(map[string]interface{}); ok {
+				if id, ok := dMap["id"].(string); ok && id == datasetID {
+					// Found matching dataset, extract provider info
+					if pid, ok := dMap["provider_id"].(string); ok && pid != "" {
+						providerID = pid
+					}
+					if pid, ok := dMap["policy_id"].(string); ok && pid != "" {
+						policyID = pid
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Fallback to contract-level fields if not found in datasets
+	if providerID == "" {
+		providerID = stringValue(contract, "data_provider_id", "provider_id")
+	}
+	if policyID == "" {
+		policyID = stringValue(contract, "policy_id", "data_provider_policy_id")
+	}
 	action = stringValue(contract, "action", "operation", "purpose")
 
 	nested := []string{"data_provider", "dataProvider", "provider"}
