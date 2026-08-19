@@ -15,14 +15,9 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 )
 
-// DB wraps the connection pool to the target (p3dx_governance) database and the
-// forms cache. The FL forms (output-owner submissions + data-provider forms)
-// live in aaa now; forms holds a local copy pushed here by aaa (see
-// forms_cache.go and httpapi/forms_ingest.go), so the form read methods go
-// through forms rather than Pool.
+// DB wraps the connection pool to the target (p3dx_governance) database.
 type DB struct {
-	Pool  *pgxpool.Pool
-	forms *formsCache
+	Pool *pgxpool.Pool
 }
 
 // dsn builds a libpq key/value DSN for the given database name. SSL is disabled
@@ -85,7 +80,7 @@ func Initialize(ctx context.Context, cfg *config.Config) (*DB, error) {
 	}
 	log.Printf("[DATABASE] Connected to database '%s'", dbName)
 
-	d := &DB{Pool: pool, forms: newFormsCache()}
+	d := &DB{Pool: pool}
 	if err := d.migrate(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -100,10 +95,6 @@ func (d *DB) Close() { d.Pool.Close() }
 // statements are idempotent (IF NOT EXISTS), matching the Node startup path.
 func (d *DB) migrate(ctx context.Context) error {
 	stmts := []string{
-		// NOTE: form_submissions and data_provider_forms are no longer created or
-		// used here — the FL forms live in aaa now, which pushes them to an
-		// in-memory cache (see forms_cache.go). Only the tables gov still owns
-		// (notifications, session_reports, contracts) are provisioned below.
 		`CREATE TABLE IF NOT EXISTS notifications (
 			id TEXT PRIMARY KEY,
 			recipient_id TEXT NOT NULL,
@@ -155,7 +146,6 @@ func (d *DB) migrate(ctx context.Context) error {
 		}
 	}
 
-	log.Println("[DATABASE] FL forms (form_submissions, data_provider_forms) are served by APD")
 	log.Println("[DATABASE] Table notifications ready")
 	log.Println("[DATABASE] Table session_reports ready")
 	log.Println("[DATABASE] Table contracts ready")

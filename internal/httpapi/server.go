@@ -1,11 +1,10 @@
 // Package httpapi implements the Governance Layer REST API: the routing
 // table, CORS, and every handler, mounted under both /api/v1 and /governance.
 //
-// Files prefixed fl_ are FL-specific (forms, participation notifications, session
-// orchestration, self-IP detection, session reports). contracts.go handles the FL
-// pathway (POST /contracts — forms-based contract assembly). general_contract.go
-// handles the general pathway (POST /contract — pre-built contracts with policy checks).
-// model.go handles final model retrieval. server.go itself is shared infra.
+// Files prefixed fl_ are FL-specific (participation notifications). contracts.go
+// handles contract management. general_contract.go handles the general pathway
+// (POST /contract — pre-built contracts with policy checks). model.go handles
+// final model retrieval. server.go itself is shared infra.
 package httpapi
 
 import (
@@ -59,21 +58,12 @@ func (s *Server) Handler() http.Handler {
 	root.Use(s.corsMiddleware)
 	root.Route("/api/v1", s.registerRoutes)
 	root.Route("/governance", s.registerRoutes)
-	// Server-to-server push from aaa (forms_ingest.go) — not part of the
-	// public API tree, no CORS involved.
-	root.Route("/internal/forms", s.registerFormsIngestRoutes)
 	return root
 }
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
 func (s *Server) registerRoutes(r chi.Router) {
-	// forms live entirely in aaa now — no form CRUD is exposed here. The
-	// session report is a derived feature (not the form itself), so it stays;
-	// it reads form data internally from a local cache aaa pushes into (see
-	// db/forms_cache.go and forms_ingest.go).
-	r.Get("/form-submissions/{id}/report", s.getSessionReport) // fl_report.go
-
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
 
@@ -95,15 +85,6 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
 	r.Get("/final-model/summary", s.getFinalModelSummary)
-
-	// session orchestration (fl_orchestration.go)
-	r.Post("/distribute-config", s.distributeConfig)
-	r.Post("/provision-env", s.provisionEnv)
-	r.Post("/push-config", s.pushConfig)
-	r.Post("/start-fl-session", s.startFLSession)
-
-	r.Get("/client-config/by-submission/{submissionId}", s.clientConfigBySubmission)
-	r.Get("/client-config/{username}", s.clientConfigByUsername)
 }
 
 // corsMiddleware reproduces the always-allow CORS of app.js: reflect the request
