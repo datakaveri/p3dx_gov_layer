@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // inspectModelPy is the torch-free .pt reader, embedded so the binary is
@@ -26,6 +27,22 @@ var inspectModelPy string
 //
 //	model_<session_id>_round_<N>.pt   (or .weights for non-pytorch backends)
 var modelFileRe = regexp.MustCompile(`^model_(.+)_round_(\d+)\.(pt|weights)$`)
+
+// safeID matches ids safe to interpolate into a filename (alphanumeric, dash,
+// underscore) — mirrors the ids newID produces in the db package.
+var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// clip truncates s to at most n bytes without splitting a multi-byte rune,
+// used to cap error messages before they're embedded in a JSON response.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
 
 // finalModel describes the final (highest-round) global model for one FL session.
 type finalModel struct {

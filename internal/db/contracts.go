@@ -239,7 +239,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 				BatchSize:        nil,
 				Model:            nil,
 				Framework:        nil,
-				Components:       "{}",
+				Components:       json.RawMessage("{}"),
 			},
 		},
 		Signatures: map[string]any{},
