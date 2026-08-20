@@ -70,8 +70,14 @@ func (s *Server) registerRoutes(r chi.Router) {
 
 	// Single contract endpoint for both pathways:
 	// Routes to FL, TEE, or SMPC orchestration based on technique field
-	r.Post("/contract", s.handleContract)
+		r.Post("/contract", s.handleContract)
 	r.Get("/contract/{sessionId}", s.getContract)
+
+	// Builds and returns an unsigned contract for display given just a
+	// dataset + technique selection (generate_contract.go). Does not sign,
+	// store, or deploy — that's still gated on POST /contract above, once
+	// the consumer-signing model is resolved.
+	r.Post("/generate-contract", s.handleGenerateContract)
 
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)

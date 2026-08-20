@@ -166,8 +166,8 @@ semantics, so this service's values win over any inherited shell variables.
 | `PUSH_AUTH_TOKEN` | Legacy `X-Auth-Token` fallback when Keycloak is unset | — |
 | **APD (Authorization Policy Database)** |
 | `APD_BASE_URL` | APD service URL for fetching forms/policies | `http://localhost:8091` |
-| `APD_POLICY_PATH_TEMPLATE` | Custom template for policy paths (supports `{provider_id}`, `{policy_id}`) | — |
-| `APD_FORM_PATH_TEMPLATE` | Custom template for form paths (supports `{dataset_id}`) | — |
+| `APD_POLICY_PATH_TEMPLATE` | Custom template for policy paths (supports `{item_id}`, `{policy_id}`) | — |
+| `APD_FORMS_TOKEN` | `X-Forms-Push-Token` sent when calling APD's forms endpoints (must match APD's `FORMS_PUSH_TOKEN`) | — |
 | **General Pathway (TEE/SMPC)** |
 | `ORCH_PRIVATE_KEY` | Path to orchestrator private key file | — |
 | `STORE_KEY` | Encryption key for secure contract storage | — |
@@ -285,6 +285,13 @@ bin/kc.sh start-dev
 go run ./cmd/server
 ```
 PGPASSWORD="$(grep '^DB_PASSWORD=' /home/azureuserfl/fl_flow/p3dx_gov_layer/.env | cut -d= -f2-)" psql -h localhost -U p3dx_gov -d p3dx_governance -c "SELECT id, project_id, session_id, finalized, jsonb_pretty(contract) AS contract FROM contracts ORDER BY updated_at DESC;"
+
+
+# jobs -l
+# pkill -f "src/server.js"
+# ss -ltnp | grep 3001
+
+# apd ==> go run ./cmd/server/main.go
 
 Or build a binary:
 

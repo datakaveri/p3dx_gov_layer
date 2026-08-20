@@ -123,9 +123,9 @@ func contractISO(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05.000Z07:00")
 }
 
-// newUUID returns a random RFC 4122 version-4 UUID string. Used for contract_id
+// NewUUID returns a random RFC 4122 version-4 UUID string. Used for contract_id
 // (avoids pulling in an external uuid dependency).
-func newUUID() string {
+func NewUUID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
@@ -202,7 +202,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	}
 	contractID := d.existingContractID(ctx, submissionID)
 	if contractID == "" {
-		contractID = newUUID()
+		contractID = NewUUID()
 	}
 	version := 1
 	if finalize {
@@ -274,6 +274,37 @@ func (d *DB) StoreContract(ctx context.Context, c *Contract, finalized bool, pat
 		return "", err
 	}
 	log.Printf("[DATABASE] Contract stored (session=%s project=%s pathway=%s finalized=%t): %s", c.SessionInfo.SessionID, c.ProjectID, pathway, finalized, id)
+	return id, nil
+}
+
+// StoreGeneratedContract upserts an unsigned, generated (preview) contract —
+// the output of POST /generate-contract, before any signing/submission. It's
+// keyed by consumer+dataset+technique (via the synthetic session_id below) so
+// regenerating the same selection overwrites the previous draft instead of
+// accumulating rows. contractJSON is pre-marshaled by the caller: the
+// GeneratedContract type lives in package services, which itself imports db
+// (for NewUUID), so db can't import services back without a cycle.
+func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, technique, contractID string, contractJSON []byte) (string, error) {
+	sessionKey := fmt.Sprintf("preview:%s:%s:%s", consumerID, datasetID, technique)
+
+	var id string
+	err := d.Pool.QueryRow(ctx, `INSERT INTO contracts
+			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
+			VALUES ($1, $2, $3, $4, false, 'PREVIEW', $5)
+		ON CONFLICT (session_id) DO UPDATE SET
+			project_id = EXCLUDED.project_id,
+			output_owner_id = EXCLUDED.output_owner_id,
+			finalized = false,
+			pathway = 'PREVIEW',
+			contract = EXCLUDED.contract,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING id`,
+		newID("con", 9), contractID, sessionKey, consumerID, contractJSON,
+	).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[DATABASE] Generated contract stored (consumer=%s dataset=%s technique=%s): %s", consumerID, datasetID, technique, id)
 	return id, nil
 }
 

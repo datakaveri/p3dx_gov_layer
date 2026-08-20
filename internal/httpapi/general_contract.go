@@ -94,16 +94,16 @@ func (s *Server) handleFLContract(w http.ResponseWriter, r *http.Request, req Co
 		return
 	}
 
-	// Fetch forms from APD for each dataset
+	// Fetch forms from APD for each dataset (APD keys provider forms by name)
 	forms := make(map[string]interface{})
 	for _, dataset := range datasets {
-		form, err := services.FetchDatasetForm(dataset)
+		form, err := services.FetchDatasetForm(dataset.Name)
 		if err != nil {
-			log.Printf("[FL] Warning: Failed to fetch form for dataset %s: %v", dataset, err)
+			log.Printf("[FL] Warning: Failed to fetch form for dataset %s: %v", dataset.ID, err)
 			// Non-blocking: continue with available forms
 			continue
 		}
-		forms[dataset] = form
+		forms[dataset.ID] = form
 	}
 
 	log.Printf("[FL] Contract received with %d datasets, fetched %d forms from APD", len(datasets), len(forms))
@@ -141,14 +141,23 @@ func (s *Server) handleGeneralContract(w http.ResponseWriter, r *http.Request, r
 	}
 
 	// Fetch and authorize policies from APD for each dataset
+	lookupProvider := func(providerID string) services.ProviderContact {
+		for _, p := range s.db.GetDataProviders(r.Context()) {
+			if p.ID == providerID {
+				return services.ProviderContact{Email: p.Email, Name: p.Name}
+			}
+		}
+		return services.ProviderContact{}
+	}
+
 	for _, dataset := range datasets {
-		allowed, err := services.AuthorizeContractAgainstAPD(req.Contract, claims, dataset)
+		allowed, err := services.AuthorizeContractAgainstAPD(req.Contract, claims, dataset.ID, dataset.Name, lookupProvider)
 		if err != nil {
-			http.Error(w, "Policy authorization failed for dataset "+dataset+": "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Policy authorization failed for dataset "+dataset.ID+": "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if !allowed {
-			http.Error(w, "User not authorized by provider policy for dataset "+dataset, http.StatusForbidden)
+			http.Error(w, "User not authorized by provider policy for dataset "+dataset.ID, http.StatusForbidden)
 			return
 		}
 	}
@@ -227,16 +236,23 @@ func stringValue(m map[string]interface{}, keys ...string) string {
 	return ""
 }
 
-// extractDatasets extracts dataset IDs/names from contract
-func extractDatasets(contract map[string]interface{}) []string {
-	var datasets []string
+// DatasetRef is a dataset entry extracted from a contract's datasets list.
+type DatasetRef struct {
+	ID   string
+	Name string
+}
+
+// extractDatasets extracts dataset id/name pairs from contract
+func extractDatasets(contract map[string]interface{}) []DatasetRef {
+	var datasets []DatasetRef
 
 	// Try multiple possible field names for datasets
 	if ds, ok := contract["datasets"].([]interface{}); ok {
 		for _, d := range ds {
 			if dMap, ok := d.(map[string]interface{}); ok {
 				if id, ok := dMap["id"].(string); ok {
-					datasets = append(datasets, id)
+					name, _ := dMap["name"].(string)
+					datasets = append(datasets, DatasetRef{ID: id, Name: name})
 				}
 			}
 		}
@@ -247,7 +263,8 @@ func extractDatasets(contract map[string]interface{}) []string {
 			for _, d := range ds {
 				if dMap, ok := d.(map[string]interface{}); ok {
 					if id, ok := dMap["id"].(string); ok {
-						datasets = append(datasets, id)
+						name, _ := dMap["name"].(string)
+						datasets = append(datasets, DatasetRef{ID: id, Name: name})
 					}
 				}
 			}
