@@ -72,6 +72,31 @@ type Config struct {
 
 	// --- forms ingest (aaa pushes form data here; see httpapi/forms_ingest.go) ---
 	FormsPushToken string // FORMS_PUSH_TOKEN — shared secret aaa sends on pushes; empty disables the check
+
+	// --- TEE orchestrator (httpapi/tee_orchestrator.go) ---
+	// The confidential VM is pre-provisioned; the orchestrator starts and stops
+	// it rather than creating it. TEEEnclaveBaseURL overrides the URL built from
+	// TEEVMIP + TEEEnclavePort, for when the manager sits behind a proxy.
+	TEEAzureRG        string        // TEE_AZURE_RG
+	TEEVMName         string        // TEE_VM_NAME
+	TEEVMIP           string        // TEE_VM_IP
+	TEEEnclavePort    string        // TEE_ENCLAVE_PORT (default 4000)
+	TEEEnclaveBaseURL string        // TEE_ENCLAVE_BASE_URL (overrides IP+port)
+	TEEStartTimeout   time.Duration // TEE_START_TIMEOUT_MS (default 300000) — cold CVM boot is slow
+	TEEPollInterval   time.Duration // TEE_POLL_INTERVAL_MS (default 5000)
+	TEEOutputTimeout  time.Duration // TEE_OUTPUT_TIMEOUT_MS (default 60000) — output may be large
+
+	// --- TEE attestation (services/attestation.go) ---
+	// TEEAttestationRequired defaults to TRUE: a run is refused unless the TEE
+	// has produced a verified attestation. Set TEE_ATTESTATION_REQUIRED=false
+	// only for local development — it turns the TEE into an ordinary VM as far
+	// as any trust claim goes.
+	TEEAttestationRequired bool          // TEE_ATTESTATION_REQUIRED (default true)
+	TEEMAAIssuers          []string      // TEE_MAA_ISSUERS (CSV) — trusted attestation endpoints
+	TEEExpectedMeasurement string        // TEE_EXPECTED_LAUNCH_MEASUREMENT (hex SHA-384; empty = unpinned)
+	TEEAttestationTTL      time.Duration // TEE_ATTESTATION_TTL_MS (default 900000) — how long a verdict authorises runs
+	TEEAttestTimeout       time.Duration // TEE_ATTEST_TIMEOUT_MS (default 180000) — attestation is slow
+	TEEClockLeeway         time.Duration // TEE_CLOCK_LEEWAY_MS (default 60000)
 }
 
 // LoadEnv loads the service's own .env with OVERRIDE semantics, matching the
@@ -137,8 +162,54 @@ func Load() *Config {
 		OwnerSelfIPs: os.Getenv("OWNER_SELF_IPS"),
 
 		FormsPushToken: os.Getenv("FORMS_PUSH_TOKEN"),
+
+		TEEAzureRG:        os.Getenv("TEE_AZURE_RG"),
+		TEEVMName:         os.Getenv("TEE_VM_NAME"),
+		TEEVMIP:           os.Getenv("TEE_VM_IP"),
+		TEEEnclavePort:    getEnv("TEE_ENCLAVE_PORT", "4000"),
+		TEEEnclaveBaseURL: os.Getenv("TEE_ENCLAVE_BASE_URL"),
+		TEEStartTimeout:   getEnvMS("TEE_START_TIMEOUT_MS", 300000),
+		TEEPollInterval:   getEnvMS("TEE_POLL_INTERVAL_MS", 5000),
+		TEEOutputTimeout:  getEnvMS("TEE_OUTPUT_TIMEOUT_MS", 60000),
+
+		TEEAttestationRequired: getEnvBool("TEE_ATTESTATION_REQUIRED", true),
+		TEEMAAIssuers:          getEnvCSV("TEE_MAA_ISSUERS"),
+		TEEExpectedMeasurement: os.Getenv("TEE_EXPECTED_LAUNCH_MEASUREMENT"),
+		TEEAttestationTTL:      getEnvMS("TEE_ATTESTATION_TTL_MS", 900000),
+		TEEAttestTimeout:       getEnvMS("TEE_ATTEST_TIMEOUT_MS", 180000),
+		TEEClockLeeway:         getEnvMS("TEE_CLOCK_LEEWAY_MS", 60000),
 	}
 	return c
+}
+
+// getEnvBool reads a boolean env var. Anything unparseable falls back rather
+// than silently reading as false — for security switches, a typo must not
+// quietly disable the check.
+func getEnvBool(key string, fallback bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return b
+}
+
+// getEnvCSV splits a comma-separated env var, trimming blanks.
+func getEnvCSV(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // KeycloakConfigured mirrors keycloak.service.js keycloakConfigured().
