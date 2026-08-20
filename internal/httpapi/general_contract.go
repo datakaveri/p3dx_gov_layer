@@ -205,7 +205,7 @@ func (s *Server) handleGeneralContract(w http.ResponseWriter, r *http.Request, r
 		TopSignature: hex.EncodeToString(orchSig),
 	}
 
-	if err := services.DeployEnclave(deployReq); err != nil {
+	if err := services.DeployEnclave(r.Context(), s.enclaveBaseURL(), deployReq); err != nil {
 		http.Error(w, "Deployment failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

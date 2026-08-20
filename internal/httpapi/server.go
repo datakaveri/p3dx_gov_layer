@@ -32,6 +32,9 @@ type Server struct {
 	db  *db.DB
 	kc  *keycloak.Client
 	http *http.Client
+	// tees tracks live TEE instances for the orchestrator API
+	// (tee_orchestrator.go).
+	tees *teeRegistry
 }
 
 // New builds the Server.
@@ -42,6 +45,7 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
 		kc:  kc,
 		// No client-level timeout: each outbound call sets its own via context.
 		http: &http.Client{},
+		tees: newTEERegistry(),
 	}
 }
 
@@ -52,6 +56,9 @@ func (s *Server) Handler() http.Handler {
 	root.Use(s.corsMiddleware)
 	root.Route("/api/v1", s.registerRoutes)
 	root.Route("/governance", s.registerRoutes)
+	// TEE orchestrator API, mounted at the root: APD builds its request URLs as
+	// {TEE_ORCHESTRATOR_URL}/v1/tee/... so these must not sit under /api/v1.
+	s.registerTEERoutes(root)
 	return root
 }
 
