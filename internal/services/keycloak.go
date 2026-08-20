@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -25,12 +26,19 @@ type JWK struct {
 	E   string `json:"e"`
 }
 
-// FetchKeycloakJWKS fetches the JWKS from KEYCLOAK_JWKS_URL and returns RSA public keys.
-// Keys are indexed by kid; if kid is empty, the first key is used.
+// FetchKeycloakJWKS fetches the JWKS from KEYCLOAK_JWKS_URL (or, if unset,
+// derives the standard path from KEYCLOAK_BASE_URL + KEYCLOAK_REALM) and
+// returns RSA public keys. Keys are indexed by kid; if kid is empty, the
+// first key is used.
 func FetchKeycloakJWKS() (map[string]*rsa.PublicKey, error) {
 	jwksURL := os.Getenv("KEYCLOAK_JWKS_URL")
 	if jwksURL == "" {
-		return nil, fmt.Errorf("KEYCLOAK_JWKS_URL not set")
+		base := strings.TrimRight(os.Getenv("KEYCLOAK_BASE_URL"), "/")
+		realm := os.Getenv("KEYCLOAK_REALM")
+		if base == "" || realm == "" {
+			return nil, fmt.Errorf("KEYCLOAK_JWKS_URL not set (and KEYCLOAK_BASE_URL/KEYCLOAK_REALM not set to derive it)")
+		}
+		jwksURL = base + "/realms/" + realm + "/protocol/openid-connect/certs"
 	}
 	resp, err := http.Get(jwksURL)
 	if err != nil {

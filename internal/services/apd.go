@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,106 +13,115 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// ProviderContact is a data provider's notification contact info, looked up
+// by provider ID from the caller's provider directory (see db.GetDataProviders).
+type ProviderContact struct {
+	Email string
+	Name  string
+}
+
+// ProviderLookup resolves a provider ID to its notification contact info.
+// A nil/zero-value return means no contact info was found.
+type ProviderLookup func(providerID string) ProviderContact
+
 // AuthorizeContractAgainstAPD fetches the data provider policy from APD for a specific dataset
 // and evaluates whether the caller claims satisfy that policy.
-// If the dataset is private, sends a notification email to the data provider.
-func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.MapClaims, datasetID string) (bool, error) {
+// If the policy marks the dataset private, sends an FYI notice to the data
+// provider — this never gates authorization, which is decided purely by policy rules.
+func AuthorizeContractAgainstAPD(contract map[string]interface{}, claims jwt.MapClaims, datasetID, datasetName string, lookupProvider ProviderLookup) (bool, error) {
 	providerID, policyID, action := extractProviderContext(contract, datasetID)
-	if providerID == "" {
-		return false, fmt.Errorf("contract missing data provider details for dataset %s", datasetID)
-	}
+	technique := stringValue(contract, "technique")
 
-	policy, err := fetchProviderPolicy(providerID, policyID)
+	policy, err := FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, technique, claims, lookupProvider)
 	if err != nil {
 		return false, err
-	}
-
-	// Check if dataset is private and send approval request email
-	if isPrivateDataset(policy) {
-		providerEmail := stringValue(policy, "provider_email", "email", "contact_email")
-		providerName := stringValue(policy, "provider_name", "name")
-
-		if providerEmail != "" {
-			if err := sendPrivateDatasetApprovalEmail(providerEmail, providerName, contract); err != nil {
-				fmt.Printf("[APD] Warning: Failed to send private dataset approval email to %s: %v\n", providerEmail, err)
-			}
-		}
 	}
 
 	return evaluatePolicy(policy, claims, action), nil
 }
 
-// FetchDatasetForm fetches the form/metadata for a dataset from APD (FL pathway)
-func FetchDatasetForm(datasetID string) (map[string]interface{}, error) {
+// FetchPolicyForDataset fetches the APD policy for a dataset and, if it's
+// marked private, fires the FYI notice to the data provider — shared by both
+// authorization time (AuthorizeContractAgainstAPD) and contract-generation
+// time (handleGenerateContract), so the notice fires exactly once either way
+// depending on which path the caller uses. Never gates/blocks the caller.
+func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, technique string, claims jwt.MapClaims, lookupProvider ProviderLookup) (map[string]interface{}, error) {
+	policy, err := fetchProviderPolicy(datasetID, policyID)
+	if err != nil {
+		return nil, err
+	}
+
+	if isPrivateDataset(policy) && lookupProvider != nil && providerID != "" {
+		contact := lookupProvider(providerID)
+		if contact.Email != "" {
+			consumer := ConsumerDisplayName(claims)
+			if err := sendPrivateDatasetNotice(contact.Email, contact.Name, consumer, datasetName, technique); err != nil {
+				fmt.Printf("[APD] Warning: Failed to send private dataset notice to %s: %v\n", contact.Email, err)
+			}
+		}
+	}
+
+	return policy, nil
+}
+
+// FetchDatasetForm fetches the data-provider forms submitted for a dataset from APD (FL
+// pathway). APD keys provider forms by dataset name, not dataset ID.
+func FetchDatasetForm(datasetName string) (map[string]interface{}, error) {
 	baseURL := strings.TrimRight(os.Getenv("APD_BASE_URL"), "/")
 	if baseURL == "" {
 		return nil, fmt.Errorf("APD_BASE_URL not set")
 	}
+	if datasetName == "" {
+		return nil, fmt.Errorf("dataset name required to fetch APD provider forms")
+	}
 
-	paths := buildFormPaths(datasetID)
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("no APD form path candidates")
+	u := baseURL + "/api/v1/forms/provider-forms?dataset_name=" + url.QueryEscape(datasetName)
+
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build APD forms request: %w", err)
+	}
+	if token := strings.TrimSpace(os.Getenv("APD_FORMS_TOKEN")); token != "" {
+		req.Header.Set("X-Forms-Push-Token", token)
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	for _, p := range paths {
-		u := baseURL + p
-		resp, err := client.Get(u)
-		if err != nil {
-			continue
-		}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch APD provider forms: %w", err)
+	}
+	defer resp.Body.Close()
 
-		if resp.StatusCode == http.StatusNotFound {
-			resp.Body.Close()
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			continue
-		}
-
-		var response map[string]interface{}
-		err = json.NewDecoder(resp.Body).Decode(&response)
-		resp.Body.Close()
-		if err != nil {
-			continue
-		}
-
-		data, ok := response["data"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		return data, nil
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("APD provider-forms endpoint returned status %d", resp.StatusCode)
 	}
 
-	return nil, fmt.Errorf("no form found in APD for dataset %q", datasetID)
+	var response map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("decode APD provider forms: %w", err)
+	}
+
+	forms, _ := response["data"].([]interface{})
+	if len(forms) == 0 {
+		return nil, fmt.Errorf("no provider forms found in APD for dataset %q", datasetName)
+	}
+
+	// The endpoint already filters by dataset_name server-side; return the
+	// most recent (first, per ORDER BY created_at DESC) matching form.
+	form, ok := forms[0].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected provider form shape for dataset %q", datasetName)
+	}
+	return form, nil
 }
 
-func buildFormPaths(datasetID string) []string {
-	template := strings.TrimSpace(os.Getenv("APD_FORM_PATH_TEMPLATE"))
-	if template != "" {
-		path := strings.ReplaceAll(template, "{dataset_id}", datasetID)
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		return []string{path}
-	}
-
-	paths := make([]string, 0, 2)
-	if datasetID != "" {
-		paths = append(paths, "/api/v1/form/dataset/"+datasetID)
-		paths = append(paths, "/api/v1/forms/"+datasetID)
-	}
-	return paths
-}
-
-func fetchProviderPolicy(providerID, policyID string) (map[string]interface{}, error) {
+func fetchProviderPolicy(itemID, policyID string) (map[string]interface{}, error) {
 	baseURL := strings.TrimRight(os.Getenv("APD_BASE_URL"), "/")
 	if baseURL == "" {
 		return nil, fmt.Errorf("APD_BASE_URL not set")
 	}
 
-	paths := buildPolicyPaths(providerID, policyID)
+	paths := buildPolicyPaths(itemID, policyID)
 	if len(paths) == 0 {
 		return nil, fmt.Errorf("no APD policy path candidates")
 	}
@@ -146,7 +156,7 @@ func fetchProviderPolicy(providerID, policyID string) (map[string]interface{}, e
 		return data, nil
 	}
 
-	return nil, fmt.Errorf("no policy found in APD for provider %q", providerID)
+	return nil, fmt.Errorf("no policy found in APD for item %q", itemID)
 }
 
 func isPrivateDataset(policy map[string]interface{}) bool {
@@ -163,7 +173,10 @@ func isPrivateDataset(policy map[string]interface{}) bool {
 	return false
 }
 
-func sendPrivateDatasetApprovalEmail(recipientEmail, providerName string, contract map[string]interface{}) error {
+// sendPrivateDatasetNotice sends the data provider a plain FYI notice that a
+// consumer is using their private dataset. This is informational only — it
+// never blocks or gates the authorization decision.
+func sendPrivateDatasetNotice(recipientEmail, providerName, consumerName, datasetName, technique string) error {
 	smtpHost := os.Getenv("SMTP_HOST")
 	smtpPort := os.Getenv("SMTP_PORT")
 	senderEmail := os.Getenv("SENDER_EMAIL")
@@ -173,23 +186,27 @@ func sendPrivateDatasetApprovalEmail(recipientEmail, providerName string, contra
 		return fmt.Errorf("SMTP configuration not set")
 	}
 
-	subject := "Manual Approval Required: Private Dataset Access Request"
-	contractJSON, _ := json.MarshalIndent(contract, "", "  ")
+	if providerName == "" {
+		providerName = "there"
+	}
+	if consumerName == "" {
+		consumerName = "A user"
+	}
+	if datasetName == "" {
+		datasetName = "(unnamed dataset)"
+	}
+
+	subject := fmt.Sprintf("%s is using your dataset %s", consumerName, datasetName)
 
 	body := fmt.Sprintf(`Hello %s,
 
-A user has requested access to your private dataset via the governance layer.
+%s is using your dataset "%s" via the governance layer (technique: %s).
 
-Please review the contract details below and approve or deny the request manually.
-
-Contract Details:
-%s
-
-To approve, please log in to the governance platform and provide your approval.
+This is an informational notice only — no action is required.
 
 Best regards,
 P3DX Governance Layer`,
-		providerName, string(contractJSON))
+		providerName, consumerName, datasetName, technique)
 
 	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s",
 		senderEmail, recipientEmail, subject, body)
@@ -205,10 +222,26 @@ P3DX Governance Layer`,
 	return nil
 }
 
-func buildPolicyPaths(providerID, policyID string) []string {
+// ConsumerDisplayName picks a human-readable name for the requesting user
+// from their Keycloak claims, falling back through preferred_username, name,
+// email, and finally sub.
+func ConsumerDisplayName(claims jwt.MapClaims) string {
+	for _, key := range []string{"preferred_username", "name", "email", "sub"} {
+		if v, ok := claims[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// buildPolicyPaths returns the candidate APD policy paths to try, in order:
+// a direct policyID lookup first (when the contract's dataset entry carries
+// one), then by-item(itemID) — itemID is the dataset/catalogue item ID,
+// which is exactly APD's Policy.ItemID.
+func buildPolicyPaths(itemID, policyID string) []string {
 	template := strings.TrimSpace(os.Getenv("APD_POLICY_PATH_TEMPLATE"))
 	if template != "" {
-		path := strings.ReplaceAll(template, "{provider_id}", providerID)
+		path := strings.ReplaceAll(template, "{item_id}", itemID)
 		path = strings.ReplaceAll(path, "{policy_id}", policyID)
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
@@ -220,8 +253,8 @@ func buildPolicyPaths(providerID, policyID string) []string {
 	if policyID != "" {
 		paths = append(paths, "/api/v1/policy/"+policyID)
 	}
-	if providerID != "" {
-		paths = append(paths, "/api/v1/policy/item/"+providerID)
+	if itemID != "" {
+		paths = append(paths, "/api/v1/policy/by-item/"+itemID)
 	}
 	return paths
 }
