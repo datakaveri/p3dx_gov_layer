@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +28,40 @@ import (
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
+
+// teeAPIError is the {status, code, message[, detail]} shape every
+// orchestrator handler below writes on failure. Pulling it into a real error
+// type lets tee_session.go's background sequencer inspect the same
+// status/code/message a direct HTTP caller would have gotten, instead of
+// duplicating each handler's error construction.
+type teeAPIError struct {
+	Status  int
+	Code    string
+	Message string
+	Detail  string
+}
+
+func (e *teeAPIError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("%s: %s (%s)", e.Code, e.Message, e.Detail)
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
+
+func writeTEEError(w http.ResponseWriter, err error) {
+	var apiErr *teeAPIError
+	if errors.As(err, &apiErr) {
+		body := j{"status": "FAILED", "error": apiErr.Code, "message": apiErr.Message}
+		if apiErr.Detail != "" {
+			body["detail"] = apiErr.Detail
+		}
+		writeJSON(w, apiErr.Status, body)
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, j{
+		"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
+	})
+}
 
 // teeInstance is one provisioned TEE: the contract it was provisioned for and
 // the VM serving it.
@@ -92,11 +127,6 @@ func (r *teeRegistry) delete(teeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.instances, teeID)
-}
-
-// contextWithTimeout derives a bounded context from the request.
-func contextWithTimeout(r *http.Request, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(r.Context(), timeout)
 }
 
 // postReceiver POSTs body to url with headers and a per-call timeout, returning
@@ -170,41 +200,28 @@ func (s *Server) lookupTEE(w http.ResponseWriter, r *http.Request) (*teeInstance
 	return inst, true
 }
 
-// POST /v1/tee/provision — start the confidential VM for a contract.
-//
-// Response shape is {"teeId": ...} because that is what APD's client decodes.
-func (s *Server) provisionTEE(w http.ResponseWriter, r *http.Request) {
-	var contract services.TEEContract
-	if !s.readBody(w, r, &contract) {
-		return
-	}
-
-	if err := services.ValidateTEEContract(&contract, time.Now()); err != nil {
-		writeJSON(w, http.StatusBadRequest, j{
-			"status": "FAILED", "error": "INVALID_CONTRACT", "message": err.Error(),
-		})
-		return
+// doProvisionTEE starts the confidential VM for contract and registers the
+// resulting instance. Shared by the direct POST /v1/tee/provision handler and
+// tee_session.go's background sequencer.
+func (s *Server) doProvisionTEE(ctx context.Context, contract *services.TEEContract) (*teeInstance, *services.EnclaveState, error) {
+	if err := services.ValidateTEEContract(contract, time.Now()); err != nil {
+		return nil, nil, &teeAPIError{Status: http.StatusBadRequest, Code: "INVALID_CONTRACT", Message: err.Error()}
 	}
 
 	if s.cfg.TEEAzureRG == "" || s.cfg.TEEVMName == "" {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "TEE_NOT_CONFIGURED",
-			"message": "TEE_AZURE_RG and TEE_VM_NAME must be set",
-		})
-		return
+		return nil, nil, &teeAPIError{
+			Status: http.StatusInternalServerError, Code: "TEE_NOT_CONFIGURED",
+			Message: "TEE_AZURE_RG and TEE_VM_NAME must be set",
+		}
 	}
 
 	vm := s.teeVM()
-	ctx := r.Context()
 
 	log.Printf("[TEE] provision: contract=%s request=%s vm=%s/%s",
 		contract.ContractID, contract.RequestID, vm.ResourceGroup, vm.Name)
 
 	if err := services.StartVM(ctx, vm); err != nil {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "VM_START_FAILED", "message": err.Error(),
-		})
-		return
+		return nil, nil, &teeAPIError{Status: http.StatusBadGateway, Code: "VM_START_FAILED", Message: err.Error()}
 	}
 
 	base := s.enclaveBaseURL()
@@ -213,11 +230,10 @@ func (s *Server) provisionTEE(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The VM is up but its manager never answered. Leave it running: tearing
 		// it down here would destroy the evidence needed to debug the guest.
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ENCLAVE_NOT_READY", "message": err.Error(),
-			"detail": "VM started but the enclave manager did not become reachable; VM left running for diagnosis",
-		})
-		return
+		return nil, nil, &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ENCLAVE_NOT_READY", Message: err.Error(),
+			Detail: "VM started but the enclave manager did not become reachable; VM left running for diagnosis",
+		}
 	}
 
 	// teeId is the contract's request id where APD supplied one, so the two
@@ -241,13 +257,47 @@ func (s *Server) provisionTEE(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[TEE] provisioned teeId=%s enclave=%s (state: step %d/%d %q)",
 		teeID, base, state.Step, state.MaxSteps, state.Title)
 
+	return inst, state, nil
+}
+
+// POST /v1/tee/provision — start the confidential VM for a contract.
+//
+// Response shape is {"teeId": ...} because that is what APD's client decodes.
+func (s *Server) provisionTEE(w http.ResponseWriter, r *http.Request) {
+	var contract services.TEEContract
+	if !s.readBody(w, r, &contract) {
+		return
+	}
+
+	inst, state, err := s.doProvisionTEE(r.Context(), &contract)
+	if err != nil {
+		writeTEEError(w, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, j{
-		"teeId":       teeID,
+		"teeId":       inst.TEEID,
 		"status":      "PROVISIONED",
-		"contract_id": contract.ContractID,
-		"enclave":     base,
+		"contract_id": inst.ContractID,
+		"enclave":     inst.EnclaveBase,
 		"state":       state,
 	})
+}
+
+// doTeeState reports Azure power state plus a short probe of the enclave's
+// own progress. probeTimeout bounds only the enclave probe — the caller wants
+// a snapshot, not a wait.
+func (s *Server) doTeeState(ctx context.Context, inst *teeInstance, probeTimeout time.Duration) (power string, state *services.EnclaveState, enclaveErr error) {
+	power, err := services.VMPowerState(ctx, inst.VM)
+	if err != nil {
+		power = "unknown"
+		log.Printf("[TEE] state: power lookup failed for %s: %v", inst.TEEID, err)
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	state, enclaveErr = services.FetchEnclaveState(probeCtx, s.http, inst.EnclaveBase)
+	return power, state, enclaveErr
 }
 
 // GET /v1/tee/{teeId}/state — Azure power state plus the enclave's own progress.
@@ -257,11 +307,7 @@ func (s *Server) teeState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	power, err := services.VMPowerState(r.Context(), inst.VM)
-	if err != nil {
-		power = "unknown"
-		log.Printf("[TEE] state: power lookup failed for %s: %v", inst.TEEID, err)
-	}
+	power, state, err := s.doTeeState(r.Context(), inst, s.cfg.PushTimeout)
 
 	resp := j{
 		"teeId":       inst.TEEID,
@@ -269,11 +315,7 @@ func (s *Server) teeState(w http.ResponseWriter, r *http.Request) {
 		"vm":          inst.VM.Name,
 		"power_state": power,
 	}
-
-	// A short probe: the caller wants a status snapshot, not a wait.
-	ctx, cancel := contextWithTimeout(r, s.cfg.PushTimeout)
-	defer cancel()
-	if state, err := services.FetchEnclaveState(ctx, s.http, inst.EnclaveBase); err == nil {
+	if err == nil {
 		resp["enclave_state"] = state
 	} else {
 		resp["enclave_state"] = nil
@@ -283,72 +325,59 @@ func (s *Server) teeState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// POST /v1/tee/{teeId}/attest — challenge the TEE and verify its attestation.
+// doAttestTEE challenges the TEE and verifies its attestation, recording the
+// verdict on inst on success. Shared by the direct POST .../attest handler
+// and tee_session.go's background sequencer.
 //
 // The orchestrator generates the nonce, so the token that comes back cannot be a
 // replay of an earlier genuine attestation. On success the verdict is recorded
 // against the instance and authorises runs until it expires.
-func (s *Server) attestTEE(w http.ResponseWriter, r *http.Request) {
-	inst, ok := s.lookupTEE(w, r)
-	if !ok {
-		return
-	}
-
+func (s *Server) doAttestTEE(ctx context.Context, inst *teeInstance) (*services.AttestationResult, error) {
 	if len(s.cfg.TEEMAAIssuers) == 0 {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "ATTESTATION_NOT_CONFIGURED",
-			"message": "TEE_MAA_ISSUERS is empty, so no attestation service is trusted and no token can be verified",
-		})
-		return
+		return nil, &teeAPIError{
+			Status: http.StatusInternalServerError, Code: "ATTESTATION_NOT_CONFIGURED",
+			Message: "TEE_MAA_ISSUERS is empty, so no attestation service is trusted and no token can be verified",
+		}
 	}
 
 	nonce, err := services.NewAttestationNonce()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
-		})
-		return
+		return nil, &teeAPIError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Message: err.Error()}
 	}
 
 	body, err := json.Marshal(map[string]string{"nonce": nonce})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
-		})
-		return
+		return nil, &teeAPIError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Message: err.Error()}
 	}
 
 	log.Printf("[TEE] attest: challenging teeId=%s", inst.TEEID)
-	status, text, err := s.postReceiver(r.Context(), inst.EnclaveBase+"/enclave/attest",
+	status, text, err := s.postReceiver(ctx, inst.EnclaveBase+"/enclave/attest",
 		map[string]string{"Content-Type": "application/json"}, body, s.cfg.TEEAttestTimeout)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ENCLAVE_UNREACHABLE",
-			"message": fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
-		})
-		return
+		return nil, &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ENCLAVE_UNREACHABLE",
+			Message: fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
+		}
 	}
 	if status < 200 || status >= 300 {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ATTESTATION_FAILED",
-			"message": fmt.Sprintf("enclave could not produce an attestation token (HTTP %d)", status),
-			"detail":  clip(text, 500),
-		})
-		return
+		return nil, &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ATTESTATION_FAILED",
+			Message: fmt.Sprintf("enclave could not produce an attestation token (HTTP %d)", status),
+			Detail:  clip(text, 500),
+		}
 	}
 
 	var enclaveResp struct {
 		JWT string `json:"jwt"`
 	}
 	if err := json.Unmarshal([]byte(text), &enclaveResp); err != nil || enclaveResp.JWT == "" {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ATTESTATION_MALFORMED",
-			"message": "enclave response did not contain a token", "detail": clip(text, 300),
-		})
-		return
+		return nil, &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ATTESTATION_MALFORMED",
+			Message: "enclave response did not contain a token", Detail: clip(text, 300),
+		}
 	}
 
-	result, err := services.VerifyMAAToken(r.Context(), s.http, enclaveResp.JWT, services.AttestationPolicy{
+	result, err := services.VerifyMAAToken(ctx, s.http, enclaveResp.JWT, services.AttestationPolicy{
 		AllowedIssuers:            s.cfg.TEEMAAIssuers,
 		Nonce:                     nonce,
 		ExpectedLaunchMeasurement: s.cfg.TEEExpectedMeasurement,
@@ -358,10 +387,7 @@ func (s *Server) attestTEE(w http.ResponseWriter, r *http.Request) {
 		// Verification failure is the interesting security event: the guest is
 		// reachable but could not prove it is the TEE we expect.
 		log.Printf("[TEE] attest REJECTED teeId=%s: %v", inst.TEEID, err)
-		writeJSON(w, http.StatusForbidden, j{
-			"status": "FAILED", "error": "ATTESTATION_REJECTED", "message": err.Error(),
-		})
-		return
+		return nil, &teeAPIError{Status: http.StatusForbidden, Code: "ATTESTATION_REJECTED", Message: err.Error()}
 	}
 
 	inst.Attestation = result
@@ -372,12 +398,78 @@ func (s *Server) attestTEE(w http.ResponseWriter, r *http.Request) {
 		inst.TEEID, result.AttestationType, result.ComplianceStatus,
 		result.Debuggable, result.LaunchMeasurement, result.MeasurementPinned)
 
+	return result, nil
+}
+
+// POST /v1/tee/{teeId}/attest — challenge the TEE and verify its attestation.
+func (s *Server) attestTEE(w http.ResponseWriter, r *http.Request) {
+	inst, ok := s.lookupTEE(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := s.doAttestTEE(r.Context(), inst)
+	if err != nil {
+		writeTEEError(w, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, j{
 		"teeId":       inst.TEEID,
 		"status":      "ATTESTED",
 		"attestation": result,
 		"valid_until": inst.AttestedAt.Add(s.cfg.TEEAttestationTTL),
 	})
+}
+
+// doRunTEE triggers the in-TEE anonymisation, gated on a fresh attestation.
+// Shared by the direct POST .../run handler and tee_session.go's background
+// sequencer.
+func (s *Server) doRunTEE(ctx context.Context, inst *teeInstance) (string, error) {
+	// Gate: no compute without a fresh, verified attestation. This is the point
+	// of enforcement — the guest has to have proved it is a genuine,
+	// non-debuggable SEV-SNP CVM before we hand it a workload.
+	if s.cfg.TEEAttestationRequired && !inst.attestationFresh(s.cfg.TEEAttestationTTL, time.Now()) {
+		reason := "this TEE has not been attested; POST /v1/tee/{teeId}/attest first"
+		if inst.Attestation != nil {
+			reason = fmt.Sprintf("attestation expired (verified at %s, TTL %s); re-attest before running",
+				inst.AttestedAt.Format(time.RFC3339), s.cfg.TEEAttestationTTL)
+		}
+		log.Printf("[TEE] run BLOCKED teeId=%s: %s", inst.TEEID, reason)
+		return "", &teeAPIError{Status: http.StatusConflict, Code: "ATTESTATION_REQUIRED", Message: reason}
+	}
+
+	// The dataset location travels contract -> orchestrator -> enclave, so the
+	// enclave anonymises what the contract named rather than something baked
+	// into its image.
+	body, err := json.Marshal(map[string]string{
+		"contract_id": inst.ContractID,
+		"tee_id":      inst.TEEID,
+		"dataset_url": inst.DatasetURL,
+	})
+	if err != nil {
+		return "", &teeAPIError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Message: err.Error()}
+	}
+	headers := map[string]string{"Content-Type": "application/json"}
+
+	status, text, err := s.postReceiver(ctx, inst.EnclaveBase+"/enclave/run",
+		headers, body, s.cfg.PushTimeout)
+	if err != nil {
+		return "", &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ENCLAVE_UNREACHABLE",
+			Message: fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
+		}
+	}
+	if status < 200 || status >= 300 {
+		return "", &teeAPIError{
+			Status: http.StatusBadGateway, Code: "RUN_REJECTED",
+			Message: fmt.Sprintf("enclave manager returned HTTP %d", status),
+			Detail:  clip(text, 500),
+		}
+	}
+
+	log.Printf("[TEE] run started teeId=%s contract=%s", inst.TEEID, inst.ContractID)
+	return clip(text, 500), nil
 }
 
 // POST /v1/tee/{teeId}/run — trigger the in-TEE anonymisation.
@@ -390,60 +482,64 @@ func (s *Server) runTEE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gate: no compute without a fresh, verified attestation. This is the point
-	// of enforcement — the guest has to have proved it is a genuine,
-	// non-debuggable SEV-SNP CVM before we hand it a workload.
-	if s.cfg.TEEAttestationRequired && !inst.attestationFresh(s.cfg.TEEAttestationTTL, time.Now()) {
-		reason := "this TEE has not been attested; POST /v1/tee/{teeId}/attest first"
-		if inst.Attestation != nil {
-			reason = fmt.Sprintf("attestation expired (verified at %s, TTL %s); re-attest before running",
-				inst.AttestedAt.Format(time.RFC3339), s.cfg.TEEAttestationTTL)
-		}
-		log.Printf("[TEE] run BLOCKED teeId=%s: %s", inst.TEEID, reason)
-		writeJSON(w, http.StatusConflict, j{
-			"status": "FAILED", "error": "ATTESTATION_REQUIRED", "message": reason,
-		})
-		return
-	}
-
-	// The dataset location travels contract -> orchestrator -> enclave, so the
-	// enclave anonymises what the contract named rather than something baked
-	// into its image.
-	body, err := json.Marshal(map[string]string{
-		"contract_id": inst.ContractID,
-		"tee_id":      inst.TEEID,
-		"dataset_url": inst.DatasetURL,
-	})
+	detail, err := s.doRunTEE(r.Context(), inst)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
-		})
-		return
-	}
-	headers := map[string]string{"Content-Type": "application/json"}
-
-	status, text, err := s.postReceiver(r.Context(), inst.EnclaveBase+"/enclave/run",
-		headers, body, s.cfg.PushTimeout)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ENCLAVE_UNREACHABLE",
-			"message": fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
-		})
-		return
-	}
-	if status < 200 || status >= 300 {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "RUN_REJECTED",
-			"message": fmt.Sprintf("enclave manager returned HTTP %d", status),
-			"detail":  clip(text, 500),
-		})
+		writeTEEError(w, err)
 		return
 	}
 
-	log.Printf("[TEE] run started teeId=%s contract=%s", inst.TEEID, inst.ContractID)
 	writeJSON(w, http.StatusAccepted, j{
-		"teeId": inst.TEEID, "status": "RUNNING", "detail": clip(text, 500),
+		"teeId": inst.TEEID, "status": "RUNNING", "detail": detail,
 	})
+}
+
+// teeOutputResult is the enclave's raw output response, buffered so it can be
+// either streamed to an HTTP caller (teeOutput) or cached on a session
+// (tee_session.go) without re-fetching.
+type teeOutputResult struct {
+	StatusCode         int
+	ContentType        string
+	ContentDisposition string
+	Body               []byte
+}
+
+// doFetchOutput fetches the anonymised output from the enclave manager,
+// buffering the full response. Shared by the direct GET .../output handler
+// and tee_session.go's background sequencer.
+func (s *Server) doFetchOutput(ctx context.Context, inst *teeInstance, rawQuery string) (*teeOutputResult, error) {
+	url := inst.EnclaveBase + "/enclave/output"
+	if rawQuery != "" {
+		url += "?" + rawQuery
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.TEEOutputTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, &teeAPIError{Status: http.StatusInternalServerError, Code: "INTERNAL_ERROR", Message: err.Error()}
+	}
+
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, &teeAPIError{
+			Status: http.StatusBadGateway, Code: "ENCLAVE_UNREACHABLE",
+			Message: fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
+		}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, &teeAPIError{Status: http.StatusBadGateway, Code: "OUTPUT_READ_FAILED", Message: err.Error()}
+	}
+
+	return &teeOutputResult{
+		StatusCode:         resp.StatusCode,
+		ContentType:        resp.Header.Get("Content-Type"),
+		ContentDisposition: resp.Header.Get("Content-Disposition"),
+		Body:               body,
+	}, nil
 }
 
 // GET /v1/tee/{teeId}/output — proxy the anonymised output to the caller.
@@ -456,43 +552,37 @@ func (s *Server) teeOutput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := inst.EnclaveBase + "/enclave/output"
-	if q := r.URL.RawQuery; q != "" {
-		url += "?" + q
-	}
-
-	ctx, cancel := contextWithTimeout(r, s.cfg.TEEOutputTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	result, err := s.doFetchOutput(r.Context(), inst, r.URL.RawQuery)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{
-			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
-		})
+		writeTEEError(w, err)
 		return
 	}
 
-	resp, err := s.http.Do(req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "ENCLAVE_UNREACHABLE",
-			"message": fmt.Sprintf("enclave manager at %s unreachable: %v", inst.EnclaveBase, err),
-		})
-		return
+	if result.ContentType != "" {
+		w.Header().Set("Content-Type", result.ContentType)
 	}
-	defer resp.Body.Close()
-
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	if result.ContentDisposition != "" {
+		w.Header().Set("Content-Disposition", result.ContentDisposition)
 	}
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		w.Header().Set("Content-Disposition", cd)
-	}
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	w.WriteHeader(result.StatusCode)
+	if _, err := w.Write(result.Body); err != nil {
 		// Headers are already sent; all that's left is to record it.
 		log.Printf("[TEE] output: copy failed for %s: %v", inst.TEEID, err)
 	}
+}
+
+// doTerminateTEE deallocates the VM and forgets the instance. Shared by the
+// direct DELETE .../terminate handler and tee_session.go.
+func (s *Server) doTerminateTEE(ctx context.Context, inst *teeInstance) error {
+	if err := services.StopVM(ctx, inst.VM); err != nil {
+		// Keep the registry entry: the VM may still be running, so the caller
+		// needs to be able to retry the teardown.
+		return &teeAPIError{Status: http.StatusBadGateway, Code: "VM_STOP_FAILED", Message: err.Error()}
+	}
+
+	s.tees.delete(inst.TEEID)
+	log.Printf("[TEE] terminated teeId=%s vm=%s", inst.TEEID, inst.VM.Name)
+	return nil
 }
 
 // DELETE /v1/tee/{teeId}/terminate — deallocate the VM and forget the instance.
@@ -502,17 +592,11 @@ func (s *Server) terminateTEE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := services.StopVM(r.Context(), inst.VM); err != nil {
-		// Keep the registry entry: the VM may still be running, so the caller
-		// needs to be able to retry the teardown.
-		writeJSON(w, http.StatusBadGateway, j{
-			"status": "FAILED", "error": "VM_STOP_FAILED", "message": err.Error(),
-		})
+	if err := s.doTerminateTEE(r.Context(), inst); err != nil {
+		writeTEEError(w, err)
 		return
 	}
 
-	s.tees.delete(inst.TEEID)
-	log.Printf("[TEE] terminated teeId=%s vm=%s", inst.TEEID, inst.VM.Name)
 	writeJSON(w, http.StatusOK, j{"teeId": inst.TEEID, "status": "TERMINATED"})
 }
 

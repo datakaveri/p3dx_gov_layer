@@ -35,6 +35,9 @@ type Server struct {
 	// tees tracks live TEE instances for the orchestrator API
 	// (tee_orchestrator.go).
 	tees *teeRegistry
+	// teeSessions tracks the provision->attest->run->output sequences started
+	// by POST /v1/tee/sessions (tee_session.go).
+	teeSessions *teeSessionRegistry
 }
 
 // New builds the Server.
@@ -44,8 +47,9 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
 		db:  database,
 		kc:  kc,
 		// No client-level timeout: each outbound call sets its own via context.
-		http: &http.Client{},
-		tees: newTEERegistry(),
+		http:        &http.Client{},
+		tees:        newTEERegistry(),
+		teeSessions: newTEESessionRegistry(),
 	}
 }
 
@@ -59,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	// TEE orchestrator API, mounted at the root: APD builds its request URLs as
 	// {TEE_ORCHESTRATOR_URL}/v1/tee/... so these must not sit under /api/v1.
 	s.registerTEERoutes(root)
+	s.registerTEESessionRoutes(root)
 	return root
 }
 
