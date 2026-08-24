@@ -287,9 +287,9 @@ go run ./cmd/server
 PGPASSWORD="$(grep '^DB_PASSWORD=' /home/azureuserfl/fl_flow/p3dx_gov_layer/.env | cut -d= -f2-)" psql -h localhost -U p3dx_gov -d p3dx_governance -c "SELECT id, project_id, session_id, finalized, jsonb_pretty(contract) AS contract FROM contracts ORDER BY updated_at DESC;"
 
 
-# jobs -l
-# pkill -f "src/server.js"
-# ss -ltnp | grep 3001
+jobs -l
+pkill -f "src/server.js"
+ss -ltnp | grep 3001
 
 # apd ==> go run ./cmd/server/main.go
 

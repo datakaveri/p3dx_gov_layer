@@ -15,6 +15,7 @@ type generateContractRequest struct {
 	ApplicationID string `json:"application_id"`
 	Technique     string `json:"technique"`
 	ProviderID    string `json:"provider_id"`
+	ComputeChoice string `json:"compute_choice"` // optional; defaulted per technique when blank
 }
 
 var validTechniques = map[string]bool{"FL": true, "TEE": true, "SMPC": true}
@@ -72,15 +73,19 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	providerName := ""
 	var form map[string]interface{}
 
-	if req.Technique == "TEE" || req.Technique == "SMPC" {
-		policy, err := services.FetchPolicyForDataset(req.DatasetID, "", req.ProviderID, datasetName, req.Technique, claims, lookupProvider)
-		if err != nil {
-			log.Printf("[GENERATE] Warning: no policy found in APD for dataset %s: %v", req.DatasetID, err)
-		} else if req.ProviderID != "" {
-			providerName = lookupProvider(req.ProviderID).Name
-		}
-		_ = policy // policy details aren't merged into the preview yet; fetching it surfaces the private-dataset notice and validates it exists.
-	} else {
+	// Fetch APD policy for every technique, FL included — this is the same
+	// lookup used at authorization time (services.AuthorizeContractAgainstAPD),
+	// kept in parity here so the private-dataset notice fires and the policy's
+	// existence is validated regardless of pathway. Never gates the preview.
+	policy, err := services.FetchPolicyForDataset(req.DatasetID, "", req.ProviderID, datasetName, req.Technique, claims, lookupProvider)
+	if err != nil {
+		log.Printf("[GENERATE] Warning: no policy found in APD for dataset %s: %v", req.DatasetID, err)
+	} else if req.ProviderID != "" {
+		providerName = lookupProvider(req.ProviderID).Name
+	}
+	_ = policy // policy details aren't merged into the preview yet; fetching it surfaces the private-dataset notice and validates it exists.
+
+	if req.Technique == "FL" {
 		f, err := services.FetchDatasetForm(datasetName)
 		if err != nil {
 			log.Printf("[GENERATE] Warning: no provider form found in APD for dataset %s: %v", datasetName, err)
@@ -95,6 +100,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		DatasetName:   datasetName,
 		ApplicationID: req.ApplicationID,
 		Technique:     req.Technique,
+		ComputeChoice: req.ComputeChoice,
 		ConsumerID:    consumerID,
 		ConsumerName:  services.ConsumerDisplayName(claims),
 		ProviderName:  providerName,
