@@ -51,7 +51,7 @@ func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, techniq
 		return nil, err
 	}
 
-	if isPrivateDataset(policy) && lookupProvider != nil && providerID != "" {
+	if IsPrivateDataset(policy) && lookupProvider != nil && providerID != "" {
 		contact := lookupProvider(providerID)
 		if contact.Email != "" {
 			consumer := ConsumerDisplayName(claims)
@@ -172,7 +172,9 @@ func fetchProviderPolicy(itemID, policyID string) (map[string]interface{}, error
 	return nil, fmt.Errorf("no policy found in APD for item %q", itemID)
 }
 
-func isPrivateDataset(policy map[string]interface{}) bool {
+// IsPrivateDataset reports whether an APD policy marks its dataset private,
+// checking the common field names APD may use for the designation.
+func IsPrivateDataset(policy map[string]interface{}) bool {
 	// Check common field names for privacy designation
 	if isPrivate, ok := policy["is_private"].(bool); ok {
 		return isPrivate

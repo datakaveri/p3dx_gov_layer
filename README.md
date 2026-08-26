@@ -102,7 +102,7 @@ Contract includes: `technique` ("FL" | "TEE" | "SMPC"), `datasets` ([{id, name},
 | `db/fl_provider_forms.go` | Data-provider form: the `DataProviderForm` struct and `GetDataProviderFormsByUsernames`/`IngestDataProviderForm`, backed by `forms_cache.go`. |
 | `db/fl_notifications.go` | The `notifications` table and the whole consent loop: `CreateNotification`, `GetNotificationsForUser`, `MarkNotificationAsRead`, `RespondToNotification` (accepted/declined + reason), and `GetNotificationsBySender` (owner's responses view). |
 | `db/fl_messages.go` | The mock `GetDataProviders` list and `StoreProviderMessage` (lazily-created `provider_messages` table for `/send-provider-message`). |
-| `db/contracts.go` | The per-session FL contract in the standard contract JSON format (`project_id`, `lifecycle`, `parties`, `session_info`, `signatures`). Signing is not implemented yet — `signatures` is emitted empty. |
+| `db/contracts.go` | The per-session FL contract in the standard contract JSON format (`project_id`, `lifecycle`, `parties`, `session_info`, `signatures`). Signing is timestamp-only consent tracking: `BuildContract` signs the output-owner party immediately (they're the one submitting), and `SignDataProviderParty` signs a data-provider party when they accept their participation notification (called from `httpapi/fl_notifications.go`). Signatures carry forward from the draft to the final-roster contract for the same session. |
 
 ### `internal/httpapi` — REST API
 | File | Purpose |
@@ -221,7 +221,7 @@ All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS ena
 | `GET` | `/notifications/{key}` | Fetch notifications for a user |
 | `GET` | `/notifications/by-sender/{key}` | Fetch notifications sent by a user |
 | `PATCH` | `/notifications/{key}/read` | Mark notification as read |
-| `POST` | `/notifications/{key}/respond` | Provider responds (accepted/declined + reason) |
+| `POST` | `/notifications/{key}/respond` | Provider responds (accepted/declined + reason); accepting also signs that provider's party on the session's contract (best-effort, via the notification's `submission_id` payload field) |
 
 ### Data Providers & Messages
 

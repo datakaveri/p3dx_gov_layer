@@ -61,6 +61,31 @@ func (d *DB) existingContractID(ctx context.Context, sessionID string) string {
 	return cid
 }
 
+// existingDataProviderSignatures returns username -> signed_at for every
+// already-signed data-provider party on this session's currently stored
+// contract. A provider signs by accepting their participation notification
+// (see SignDataProviderParty), which happens against the draft (finalize=false)
+// contract; carrying that signature forward here means it survives the
+// draft -> final-roster rebuild in BuildContract instead of resetting to
+// unsigned.
+func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID string) map[string]*time.Time {
+	raw, err := d.GetContractBySession(ctx, sessionID)
+	if err != nil || raw == nil {
+		return nil
+	}
+	var existing contract.Contract
+	if err := json.Unmarshal(raw, &existing); err != nil {
+		return nil
+	}
+	signed := make(map[string]*time.Time, len(existing.Parties.DataProviders))
+	for _, p := range existing.Parties.DataProviders {
+		if p.Signature.SignedAt != nil {
+			signed[p.Name] = p.Signature.SignedAt
+		}
+	}
+	return signed
+}
+
 // BuildContract assembles a contract for the given submission session ID and parties.
 // Since forms are now stored in APD only, dataset fields from provider forms are
 // left blank. It reuses an already-assigned project_id and contract_id for
@@ -72,13 +97,18 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		pathway = "FL"
 	}
 
+	priorSignatures := d.existingDataProviderSignatures(ctx, submissionID)
 	dataProviders := make([]contract.DataProviderParty, 0, len(parties))
 	for _, p := range parties {
-		dataProviders = append(dataProviders, contract.DataProviderParty{
+		dp := contract.DataProviderParty{
 			ID:          p.ID,
 			Name:        p.Username,
 			Constraints: contract.Constraints{RestrictedTo: []string{}},
-		})
+		}
+		if signedAt, ok := priorSignatures[p.Username]; ok {
+			dp.Signature.SignedAt = signedAt
+		}
+		dataProviders = append(dataProviders, dp)
 	}
 
 	// The drafting party (the output owner). Use ownerUserID if provided,
@@ -116,8 +146,9 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		ExecutionPlatform: "AZURE_AMD_SEV",
 		Parties: contract.Parties{
 			User: contract.UserParty{
-				ID:   ownerUserID,
-				Name: ownerUserID,
+				ID:        ownerUserID,
+				Name:      ownerUserID,
+				Signature: contract.Signature{SignedAt: &now},
 			},
 			DataProviders:        dataProviders,
 			ApplicationProviders: []contract.ApplicationProviderParty{},
@@ -196,6 +227,52 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 	}
 	log.Printf("[DATABASE] Generated contract stored (consumer=%s dataset=%s technique=%s): %s", consumerID, datasetID, technique, id)
 	return id, nil
+}
+
+// SignDataProviderParty marks a data-provider party as signed (signature.signed_at
+// = now) on this session's stored contract, matched by username (that's all the
+// participation-response flow carries — see httpapi.respondToNotification).
+// It's a no-op, returning (false, nil), when there's no stored contract yet, no
+// party with that username, or that party already signed. finalize (a later
+// BuildContract call rebuilding the contract for this session) carries the
+// signature forward via existingDataProviderSignatures, so it survives the
+// draft -> final-roster transition.
+func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username string) (bool, error) {
+	raw, err := d.GetContractBySession(ctx, sessionID)
+	if err != nil || raw == nil {
+		return false, err
+	}
+	var c contract.Contract
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return false, err
+	}
+
+	signed := false
+	now := time.Now().UTC()
+	for i := range c.Parties.DataProviders {
+		p := &c.Parties.DataProviders[i]
+		if p.Name == username && p.Signature.SignedAt == nil {
+			p.Signature.SignedAt = &now
+			signed = true
+		}
+	}
+	if !signed {
+		return false, nil
+	}
+
+	updated, err := json.Marshal(c)
+	if err != nil {
+		return false, err
+	}
+	_, err = d.Pool.Exec(ctx,
+		`UPDATE contracts SET contract = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2`,
+		updated, sessionID,
+	)
+	if err != nil {
+		return false, err
+	}
+	log.Printf("[DATABASE] Signed data-provider party (session=%s username=%s)", sessionID, username)
+	return true, nil
 }
 
 // GetContractBySession returns the stored contract for a session, or (nil, nil)

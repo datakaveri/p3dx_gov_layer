@@ -97,6 +97,16 @@ type Config struct {
 	TEEAttestationTTL      time.Duration // TEE_ATTESTATION_TTL_MS (default 900000) — how long a verdict authorises runs
 	TEEAttestTimeout       time.Duration // TEE_ATTEST_TIMEOUT_MS (default 180000) — attestation is slow
 	TEEClockLeeway         time.Duration // TEE_CLOCK_LEEWAY_MS (default 60000)
+
+	// --- ad-hoc VM provisioning (httpapi/vm_provision.go) ---
+	// Unlike the TEE flow above, this creates a brand-new VM per request
+	// rather than starting a pre-provisioned one.
+	VMAzureRG       string        // VM_AZURE_RG — resource group new VMs are created into
+	VMAzureLocation string        // VM_AZURE_LOCATION (default "eastus")
+	VMImage         string        // VM_IMAGE (default "Ubuntu2204")
+	VMSize          string        // VM_SIZE (default "Standard_B2s")
+	VMAdminUser     string        // VM_ADMIN_USER (default "azureuser")
+	VMCreateTimeout time.Duration // VM_CREATE_TIMEOUT_MS (default 300000)
 }
 
 // LoadEnv loads the service's own .env with OVERRIDE semantics, matching the

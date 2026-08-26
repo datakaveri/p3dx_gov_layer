@@ -15,10 +15,15 @@ import (
 	"time"
 )
 
-// Signature carries per-party consent state. It is a bookkeeping timestamp
-// only — no signature bytes or cryptographic verification are attached to it
-// (that remains a separate, still-undesigned concern; see the top-level
-// signature verification already performed in httpapi.handleContract).
+// Signature carries per-party consent state: nil until the party signs, then
+// the time they did. It is a bookkeeping timestamp only — no signature bytes
+// or cryptographic verification are attached to it (that remains a separate
+// concern; see the top-level signature verification already performed in
+// httpapi.handleContract). For the FL pathway, the drafting/output-owner
+// party is signed as soon as they submit a contract version (db.BuildContract),
+// and each data-provider party is signed when they accept the participation
+// notification (db.SignDataProviderParty, called from
+// httpapi.respondToNotification).
 type Signature struct {
 	SignedAt *time.Time `json:"signed_at"`
 }
@@ -129,19 +134,49 @@ type Contract struct {
 }
 
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with
-// ContractHash itself blanked out first (a field can't hash itself).
-//
-// This is a placeholder recipe: it does not yet zero out each party's
-// Signature block, so the hash will change as parties sign. Revisit once the
-// per-party signing/verification model is designed — at that point the hash
-// likely needs to be computed once, before any signing, over a fully
-// signature-blanked contract so it stays stable across the sign lifecycle.
+// ContractHash itself, and every party's Signature block, blanked out first.
+// Blanking the signatures means the hash is computed once, before any party
+// signs, and stays stable as signatures accrue afterwards (BuildContract's
+// owner self-sign, then each provider's SignDataProviderParty on accept).
 func ComputeHash(c Contract) (string, error) {
 	c.ContractHash = ""
+	c = withoutSignatures(c)
 	b, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(b)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// withoutSignatures returns a copy of c with every party's Signature zeroed.
+// c is taken by value, but its slice fields still alias the caller's
+// underlying arrays, so each slice is re-allocated before its elements are
+// mutated — otherwise blanking signatures here would blank them for the
+// caller too.
+func withoutSignatures(c Contract) Contract {
+	c.Parties.User.Signature = Signature{}
+
+	dataProviders := make([]DataProviderParty, len(c.Parties.DataProviders))
+	copy(dataProviders, c.Parties.DataProviders)
+	for i := range dataProviders {
+		dataProviders[i].Signature = Signature{}
+	}
+	c.Parties.DataProviders = dataProviders
+
+	appProviders := make([]ApplicationProviderParty, len(c.Parties.ApplicationProviders))
+	copy(appProviders, c.Parties.ApplicationProviders)
+	for i := range appProviders {
+		appProviders[i].Signature = Signature{}
+	}
+	c.Parties.ApplicationProviders = appProviders
+
+	infraProviders := make([]InfraProviderParty, len(c.Parties.InfraProviders))
+	copy(infraProviders, c.Parties.InfraProviders)
+	for i := range infraProviders {
+		infraProviders[i].Signature = Signature{}
+	}
+	c.Parties.InfraProviders = infraProviders
+
+	return c
 }

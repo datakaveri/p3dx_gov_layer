@@ -71,6 +71,8 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	}
 
 	providerName := ""
+	isPrivate := false
+	dataURL := ""
 	var form map[string]interface{}
 
 	// Fetch APD policy for every technique, FL included — this is the same
@@ -80,10 +82,15 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	policy, err := services.FetchPolicyForDataset(req.DatasetID, "", req.ProviderID, datasetName, req.Technique, claims, lookupProvider)
 	if err != nil {
 		log.Printf("[GENERATE] Warning: no policy found in APD for dataset %s: %v", req.DatasetID, err)
-	} else if req.ProviderID != "" {
-		providerName = lookupProvider(req.ProviderID).Name
+	} else {
+		isPrivate = services.IsPrivateDataset(policy)
+		if url, ok := policy["data_url"].(string); ok {
+			dataURL = url
+		}
+		if req.ProviderID != "" {
+			providerName = lookupProvider(req.ProviderID).Name
+		}
 	}
-	_ = policy // policy details aren't merged into the preview yet; fetching it surfaces the private-dataset notice and validates it exists.
 
 	if req.Technique == "FL" {
 		f, err := services.FetchDatasetForm(datasetName)
@@ -106,6 +113,8 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		ProviderName:  providerName,
 		ProviderID:    req.ProviderID,
 		Form:          form,
+		IsPrivate:     isPrivate,
+		DataURL:       dataURL,
 	})
 
 	if contractJSON, err := json.Marshal(contract); err == nil {

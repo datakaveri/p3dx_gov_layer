@@ -8,9 +8,10 @@ import (
 )
 
 // GenerateContractInput carries what's known when a user has picked a
-// dataset and a technique. Fields APD/the catalogue can't supply yet
-// (real data URLs/hashes, application provider identity) stay placeholder —
-// this mirrors the same limitation contract-gen already had.
+// dataset and a technique. DataURL comes from the APD policy when the
+// provider set one (see PolicyForm's "Data URL" field); fields APD/the
+// catalogue still can't supply (hashes, application provider identity)
+// stay placeholder.
 type GenerateContractInput struct {
 	DatasetID     string
 	DatasetName   string
@@ -22,6 +23,8 @@ type GenerateContractInput struct {
 	ProviderName  string // resolved from the provider directory, if a provider was found
 	ProviderID    string
 	Form          map[string]interface{} // provider form data, if FetchDatasetForm found one
+	IsPrivate     bool                    // from the APD policy's is_private flag, if one was found
+	DataURL       string                  // from the APD policy's data_url field, if one was found
 }
 
 // defaultComputeChoice maps a technique to its descriptive compute_choice
@@ -52,12 +55,18 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		dataProviderName = "Unknown Data Provider"
 	}
 
+	accessibilityLevel := "PUBLIC"
+	if in.IsPrivate {
+		accessibilityLevel = "PRIVATE"
+	}
+
 	dataProvider := contract.DataProviderParty{
 		ID:             in.ProviderID,
 		Name:           dataProviderName,
 		DatasetName:    in.DatasetName,
 		DatasetVersion: "v1",
-		Constraints:    contract.Constraints{AccessibilityLevel: "PUBLIC", RestrictedTo: []string{}},
+		DataURL:        in.DataURL,
+		Constraints:    contract.Constraints{AccessibilityLevel: accessibilityLevel, RestrictedTo: []string{}},
 	}
 	_ = in.Form // data_size_bytes etc. aren't part of this schema; kept for future use
 
