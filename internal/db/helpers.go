@@ -33,3 +33,6 @@ func jsonbOr(raw json.RawMessage, def string) []byte {
 	}
 	return []byte(raw)
 }
+
+
+//thsi file is use to create the ids and also it is used to save the empty json files as{},[]

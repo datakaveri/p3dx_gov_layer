@@ -94,7 +94,7 @@ func (s *Server) listFinalModels() ([]finalModel, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].modTime > out[j].modTime })
 	return out, nil
 }
-
+//thsi will return the above as json file 
 // GET /final-models — list each session's final (highest-round) model, newest
 // first, plus `latest` (the most recently written one) for convenience.
 func (s *Server) getFinalModels(w http.ResponseWriter, r *http.Request) {

@@ -34,6 +34,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// thsi will build the contract  and 
 	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -49,6 +50,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//contract gets stored in db 
 	contractID, err := s.db.StoreContract(reqCtx(r), contract, body.Finalize, "FL")
 	if err != nil {
 		log.Println("[GOVERNANCE] Error storing contract:", err)
@@ -58,6 +60,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//like a contract payload is sent to the client with the status code 201
 	log.Printf("[GOVERNANCE] ✅ Contract %s ready (session=%s finalized=%t)", contractID, contract.SessionInfo.SessionID, body.Finalize)
 	writeJSON(w, http.StatusCreated, j{
 		"status": "SUCCESS", "contract_id": contractID, "finalized": body.Finalize, "contract": contract,

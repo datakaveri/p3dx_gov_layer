@@ -19,12 +19,14 @@ import (
 // always complete.
 
 // ContractPartyInput is one provider passed in from the caller: the Keycloak id
-// and username. The dataset fields are left blank — the FL flow doesn't
-// capture them (forms live in APD only), so the contract's dataset fields for
-// each party stay unpopulated.
+// and username, plus that provider's dataset info pulled from their APD
+// provider-form (dataset_name / dataset_location_url), keyed by data_owner_id
+// == username. Left blank when the caller has no form data for this provider.
 type ContractPartyInput struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DatasetName string `json:"dataset_name"`
+	DataURL     string `json:"data_url"`
 }
 
 // NewUUID returns a random RFC 4122 version-4 UUID string. Used for contract_id
@@ -103,6 +105,8 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		dp := contract.DataProviderParty{
 			ID:          p.ID,
 			Name:        p.Username,
+			DatasetName: p.DatasetName,
+			DataURL:     p.DataURL,
 			Constraints: contract.Constraints{RestrictedTo: []string{}},
 		}
 		if signedAt, ok := priorSignatures[p.Username]; ok {
@@ -237,6 +241,8 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 // BuildContract call rebuilding the contract for this session) carries the
 // signature forward via existingDataProviderSignatures, so it survives the
 // draft -> final-roster transition.
+
+// checks that the contarct is signed by the data providers and if they have signed or not ust updates 
 func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username string) (bool, error) {
 	raw, err := d.GetContractBySession(ctx, sessionID)
 	if err != nil || raw == nil {
@@ -277,6 +283,7 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 
 // GetContractBySession returns the stored contract for a session, or (nil, nil)
 // when none exists.
+//fetches the raw contract to get session id 
 func (d *DB) GetContractBySession(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	var raw json.RawMessage
 	err := d.Pool.QueryRow(ctx, `SELECT contract FROM contracts WHERE session_id = $1`, sessionID).Scan(&raw)

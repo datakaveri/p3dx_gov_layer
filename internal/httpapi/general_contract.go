@@ -1,3 +1,4 @@
+//routes the contract to the unified tech like smpc/tee/fl
 package httpapi
 
 import (
