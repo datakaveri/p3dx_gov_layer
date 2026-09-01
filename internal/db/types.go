@@ -24,3 +24,6 @@ func (r *Real) F64() float64 {
 // BigInt mirrors node-postgres' default of returning a BIGINT (int8) column as a
 // JSON string (it does this to avoid precision loss for values beyond 2^53).
 type BigInt int64
+
+
+// to round of the numbers and also insted of 0.0000985266462 to 0.01

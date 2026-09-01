@@ -1,3 +1,4 @@
+//routes the contract to the unified tech like smpc/tee/fl
 package httpapi
 
 import (
@@ -9,7 +10,7 @@ import (
 	"os"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
@@ -106,12 +107,34 @@ func (s *Server) handleFLContract(w http.ResponseWriter, r *http.Request, req Co
 		forms[dataset.ID] = form
 	}
 
+	// Also fetch APD policy for each dataset, same lookup handleGeneralContract
+	// does for TEE/SMPC — this keeps policy-fetch parity across pathways (surfaces
+	// the private-dataset notice, validates the policy exists) but, unlike
+	// handleGeneralContract, does not evaluate/gate on it: FL's contract flow
+	// doesn't reject on policy the way TEE/SMPC does.
+	lookupProvider := func(providerID string) services.ProviderContact {
+		for _, p := range s.db.GetDataProviders(r.Context()) {
+			if p.ID == providerID {
+				return services.ProviderContact{Email: p.Email, Name: p.Name}
+			}
+		}
+		return services.ProviderContact{}
+	}
+	for _, dataset := range datasets {
+		if _, err := services.FetchPolicyForContractDataset(req.Contract, claims, dataset.ID, dataset.Name, lookupProvider); err != nil {
+			log.Printf("[FL] Warning: no policy found in APD for dataset %s: %v", dataset.ID, err)
+		}
+	}
+
 	log.Printf("[FL] Contract received with %d datasets, fetched %d forms from APD", len(datasets), len(forms))
 
 	// Store contract in database with FL pathway
-	contract := &db.Contract{}
-	if err := json.Unmarshal(contractBytes, contract); err == nil {
-		_, dbErr := s.db.StoreContract(context.Background(), contract, true, "FL")
+	parsedContract := &contract.Contract{}
+	if err := json.Unmarshal(contractBytes, parsedContract); err == nil {
+		if hash, hashErr := contract.ComputeHash(*parsedContract); hashErr == nil {
+			parsedContract.ContractHash = hash
+		}
+		_, dbErr := s.db.StoreContract(context.Background(), parsedContract, true, "FL")
 		if dbErr != nil {
 			log.Printf("[GOVERNANCE] Warning: Failed to store FL contract in DB: %v", dbErr)
 		}
@@ -182,9 +205,12 @@ func (s *Server) handleGeneralContract(w http.ResponseWriter, r *http.Request, r
 	}
 
 	// Store contract in database with GENERAL pathway
-	contract := &db.Contract{}
-	if err := json.Unmarshal(contractBytes, contract); err == nil {
-		_, dbErr := s.db.StoreContract(context.Background(), contract, true, "GENERAL")
+	parsedContract := &contract.Contract{}
+	if err := json.Unmarshal(contractBytes, parsedContract); err == nil {
+		if hash, hashErr := contract.ComputeHash(*parsedContract); hashErr == nil {
+			parsedContract.ContractHash = hash
+		}
+		_, dbErr := s.db.StoreContract(context.Background(), parsedContract, true, "GENERAL")
 		if dbErr != nil {
 			log.Printf("[GOVERNANCE] Warning: Failed to store GENERAL contract in DB: %v", dbErr)
 		}
@@ -242,17 +268,38 @@ type DatasetRef struct {
 	Name string
 }
 
-// extractDatasets extracts dataset id/name pairs from contract
+// extractDatasets extracts dataset id/name pairs from a contract. The
+// canonical shape (internal/contract.Contract) nests providers under
+// parties.data_providers[], where dataset_name (not name) carries the
+// dataset's identity and id is the provider's own id — there's no separate
+// dataset-catalog id in this schema, so the provider id doubles as the
+// dataset reference. Older top-level "datasets"/"data_providers" shapes are
+// kept as fallbacks for callers still sending the pre-unification format.
 func extractDatasets(contract map[string]interface{}) []DatasetRef {
 	var datasets []DatasetRef
 
-	// Try multiple possible field names for datasets
-	if ds, ok := contract["datasets"].([]interface{}); ok {
-		for _, d := range ds {
-			if dMap, ok := d.(map[string]interface{}); ok {
-				if id, ok := dMap["id"].(string); ok {
-					name, _ := dMap["name"].(string)
-					datasets = append(datasets, DatasetRef{ID: id, Name: name})
+	if parties, ok := contract["parties"].(map[string]interface{}); ok {
+		if ds, ok := parties["data_providers"].([]interface{}); ok {
+			for _, d := range ds {
+				if dMap, ok := d.(map[string]interface{}); ok {
+					if id, ok := dMap["id"].(string); ok {
+						name, _ := dMap["dataset_name"].(string)
+						datasets = append(datasets, DatasetRef{ID: id, Name: name})
+					}
+				}
+			}
+		}
+	}
+
+	// Try older top-level field names for datasets
+	if len(datasets) == 0 {
+		if ds, ok := contract["datasets"].([]interface{}); ok {
+			for _, d := range ds {
+				if dMap, ok := d.(map[string]interface{}); ok {
+					if id, ok := dMap["id"].(string); ok {
+						name, _ := dMap["name"].(string)
+						datasets = append(datasets, DatasetRef{ID: id, Name: name})
+					}
 				}
 			}
 		}

@@ -118,6 +118,24 @@ func (s *Server) respondToNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[GOVERNANCE] %s %s participation request %s", body.Username, body.Response, id)
+
+	// Accepting a participation request is this provider's contract signature.
+	// The notification payload carries submission_id (see README's payload
+	// shape); non-blocking, same as the other best-effort FL lookups — a
+	// missing/malformed submission_id just means no session contract to sign.
+	if body.Response == "accepted" {
+		var payload struct {
+			SubmissionID string `json:"submission_id"`
+		}
+		if err := json.Unmarshal(updated.Payload, &payload); err == nil && payload.SubmissionID != "" {
+			if signed, err := s.db.SignDataProviderParty(reqCtx(r), payload.SubmissionID, body.Username); err != nil {
+				log.Println("[GOVERNANCE] Warning: failed to sign contract party:", err)
+			} else if signed {
+				log.Printf("[GOVERNANCE] %s signed contract for session %s", body.Username, payload.SubmissionID)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "notification": updated})
 }
 

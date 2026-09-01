@@ -51,7 +51,7 @@ func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, techniq
 		return nil, err
 	}
 
-	if isPrivateDataset(policy) && lookupProvider != nil && providerID != "" {
+	if IsPrivateDataset(policy) && lookupProvider != nil && providerID != "" {
 		contact := lookupProvider(providerID)
 		if contact.Email != "" {
 			consumer := ConsumerDisplayName(claims)
@@ -62,6 +62,19 @@ func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, techniq
 	}
 
 	return policy, nil
+}
+
+// FetchPolicyForContractDataset extracts provider context from a contract for
+// a given dataset and fetches its APD policy — the same fetch
+// AuthorizeContractAgainstAPD performs, without evaluating/gating on it. This
+// lets a pathway (namely FL, see handleFLContract) look up policy for parity
+// with the TEE/SMPC pathway — surfacing the private-dataset notice and
+// validating the policy exists — without treating it as a hard authorization
+// gate, since the FL contract flow doesn't reject on policy the way TEE/SMPC does.
+func FetchPolicyForContractDataset(contract map[string]interface{}, claims jwt.MapClaims, datasetID, datasetName string, lookupProvider ProviderLookup) (map[string]interface{}, error) {
+	providerID, policyID, _ := extractProviderContext(contract, datasetID)
+	technique := stringValue(contract, "technique")
+	return FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, technique, claims, lookupProvider)
 }
 
 // FetchDatasetForm fetches the data-provider forms submitted for a dataset from APD (FL
@@ -159,7 +172,9 @@ func fetchProviderPolicy(itemID, policyID string) (map[string]interface{}, error
 	return nil, fmt.Errorf("no policy found in APD for item %q", itemID)
 }
 
-func isPrivateDataset(policy map[string]interface{}) bool {
+// IsPrivateDataset reports whether an APD policy marks its dataset private,
+// checking the common field names APD may use for the designation.
+func IsPrivateDataset(policy map[string]interface{}) bool {
 	// Check common field names for privacy designation
 	if isPrivate, ok := policy["is_private"].(bool); ok {
 		return isPrivate
@@ -260,19 +275,38 @@ func buildPolicyPaths(itemID, policyID string) []string {
 }
 
 func extractProviderContext(contract map[string]interface{}, datasetID string) (providerID, policyID, action string) {
-	// First try to find provider info for the specific dataset
-	if datasets, ok := contract["datasets"].([]interface{}); ok {
-		for _, d := range datasets {
-			if dMap, ok := d.(map[string]interface{}); ok {
-				if id, ok := dMap["id"].(string); ok && id == datasetID {
-					// Found matching dataset, extract provider info
-					if pid, ok := dMap["provider_id"].(string); ok && pid != "" {
-						providerID = pid
+	// Canonical shape: parties.data_providers[] (see internal/contract.Contract).
+	// There's no separate dataset-catalog id in this schema — the provider's
+	// own id doubles as the dataset reference, matching extractDatasets.
+	if parties, ok := contract["parties"].(map[string]interface{}); ok {
+		if dataProviders, ok := parties["data_providers"].([]interface{}); ok {
+			for _, d := range dataProviders {
+				if dMap, ok := d.(map[string]interface{}); ok {
+					if id, ok := dMap["id"].(string); ok && id == datasetID {
+						providerID = id
+						break
 					}
-					if pid, ok := dMap["policy_id"].(string); ok && pid != "" {
-						policyID = pid
+				}
+			}
+		}
+	}
+
+	// Fall back to the older top-level "datasets" shape for callers still
+	// sending the pre-unification format.
+	if providerID == "" && policyID == "" {
+		if datasets, ok := contract["datasets"].([]interface{}); ok {
+			for _, d := range datasets {
+				if dMap, ok := d.(map[string]interface{}); ok {
+					if id, ok := dMap["id"].(string); ok && id == datasetID {
+						// Found matching dataset, extract provider info
+						if pid, ok := dMap["provider_id"].(string); ok && pid != "" {
+							providerID = pid
+						}
+						if pid, ok := dMap["policy_id"].(string); ok && pid != "" {
+							policyID = pid
+						}
+						break
 					}
-					break
 				}
 			}
 		}

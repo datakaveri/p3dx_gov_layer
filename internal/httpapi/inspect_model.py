@@ -1,3 +1,4 @@
+// so this will read the models and the vales inside the model , thsi also have the output in json format
 #!/usr/bin/env python3
 """Read a PyTorch .pt (torch.save) checkpoint WITHOUT torch and emit a readable
 JSON summary: layers, shapes, dtypes, total params, and a few sample weights.

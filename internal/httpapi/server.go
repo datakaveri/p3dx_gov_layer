@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
+//helps to hit url to the respective handler 
 func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
@@ -85,6 +86,12 @@ func (s *Server) registerRoutes(r chi.Router) {
 		r.Post("/contract", s.handleContract)
 	r.Get("/contract/{sessionId}", s.getContract)
 
+	// FL session/roster contract (contracts.go): assembles + stores the
+	// unsigned session contract from a submission_id + parties list. Called by
+	// the AAA layer on the participation request (finalize=false) and again on
+	// the Final Roster send (finalize=true).
+	r.Post("/contracts", s.postContract)
+
 	// Builds and returns an unsigned contract for display given just a
 	// dataset + technique selection (generate_contract.go). Does not sign,
 	// store, or deploy — that's still gated on POST /contract above, once
@@ -99,6 +106,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 // corsMiddleware reproduces the always-allow CORS of app.js: reflect the request
 // Origin, advertise GET/POST/OPTIONS + Content-Type/Authorization, and answer
 // preflight with 204. A log line is emitted per request, like the Node version.
+//thsi is teh place where a request hit the server 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -124,6 +132,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 type j = map[string]any
 
 // writeJSON sends v as JSON with the given status code.
+// this will send the final json to client  with the status code
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -131,6 +140,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // decodeJSON reads and decodes a JSON request body (capped at 5MB) into dst.
+// this will reject the json 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	return json.NewDecoder(r.Body).Decode(dst)
@@ -142,6 +152,7 @@ func reqCtx(r *http.Request) context.Context { return r.Context() }
 // readBody decodes a JSON request body into dst. An empty body is treated as
 // an empty object (matching express.json). A genuine JSON syntax error
 // responds 400 INVALID_JSON and returns false.
+// tihs will prase the incoming json file 
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	err := decodeJSON(w, r, dst)
 	if err != nil && !errors.Is(err, io.EOF) {
