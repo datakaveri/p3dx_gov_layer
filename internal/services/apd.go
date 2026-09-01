@@ -64,6 +64,14 @@ func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, techniq
 	return policy, nil
 }
 
+// FetchInfraPolicy fetches the APD infra-provider policy for an infrastructure
+// id — the InfraCat/SMPC analog of FetchPolicyForDataset. Uses the same
+// fetchProviderPolicy lookup (GET /api/v1/policy/by-item/{id}); no
+// private-dataset-style notice applies here.
+func FetchInfraPolicy(infraID string) (map[string]interface{}, error) {
+	return fetchProviderPolicy(infraID, "")
+}
+
 // FetchPolicyForContractDataset extracts provider context from a contract for
 // a given dataset and fetches its APD policy — the same fetch
 // AuthorizeContractAgainstAPD performs, without evaluating/gating on it. This

@@ -16,6 +16,7 @@ type generateContractRequest struct {
 	Technique     string `json:"technique"`
 	ProviderID    string `json:"provider_id"`
 	ComputeChoice string `json:"compute_choice"` // optional; defaulted per technique when blank
+	InfraID       string `json:"infra_id"`       // InfraCat selection; SMPC only
 }
 
 var validTechniques = map[string]bool{"FL": true, "TEE": true, "SMPC": true}
@@ -101,6 +102,39 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// InfraCat: resolve the selected infrastructure's APD policy into the
+	// contract's InfraProviderParty fields. SMPC only, and never gates the
+	// preview — same graceful-degradation style as the dataset policy fetch
+	// above (BuildGeneratedContract falls back to "Unknown Infrastructure"
+	// if the lookup or shape doesn't resolve a name).
+	var infraName, infraRegion, infraAttestationService, infraAttestationPolicyID string
+	var infraAttestationRequired bool
+	var infraCPUCores, infraRAMMB int
+	if req.Technique == "SMPC" && req.InfraID != "" {
+		infraPolicy, err := services.FetchInfraPolicy(req.InfraID)
+		if err != nil {
+			log.Printf("[GENERATE] Warning: no infra policy found in APD for infra %s: %v", req.InfraID, err)
+		} else if rules, ok := infraPolicy["rules"].(map[string]interface{}); ok {
+			if infra, ok := rules["infrastructure"].(map[string]interface{}); ok {
+				infraName, _ = infra["name"].(string)
+				infraRegion, _ = infra["region"].(string)
+				if attestation, ok := infra["attestation"].(map[string]interface{}); ok {
+					infraAttestationRequired, _ = attestation["required"].(bool)
+					infraAttestationService, _ = attestation["service"].(string)
+					infraAttestationPolicyID, _ = attestation["policy_id"].(string)
+				}
+				if capacity, ok := infra["capacity"].(map[string]interface{}); ok {
+					if v, ok := capacity["cpu_cores"].(float64); ok { // JSON numbers decode as float64
+						infraCPUCores = int(v)
+					}
+					if v, ok := capacity["ram_mb"].(float64); ok {
+						infraRAMMB = int(v)
+					}
+				}
+			}
+		}
+	}
+
 	consumerID, _ := claims["sub"].(string)
 	contract := services.BuildGeneratedContract(services.GenerateContractInput{
 		DatasetID:     req.DatasetID,
@@ -115,6 +149,15 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		Form:          form,
 		IsPrivate:     isPrivate,
 		DataURL:       dataURL,
+
+		InfraID:                  req.InfraID,
+		InfraName:                infraName,
+		InfraRegion:              infraRegion,
+		InfraAttestationRequired: infraAttestationRequired,
+		InfraAttestationService:  infraAttestationService,
+		InfraAttestationPolicyID: infraAttestationPolicyID,
+		InfraCPUCores:            infraCPUCores,
+		InfraRAMMB:               infraRAMMB,
 	})
 
 	if contractJSON, err := json.Marshal(contract); err == nil {
