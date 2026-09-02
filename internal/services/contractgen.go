@@ -25,6 +25,18 @@ type GenerateContractInput struct {
 	Form          map[string]interface{} // provider form data, if FetchDatasetForm found one
 	IsPrivate     bool                    // from the APD policy's is_private flag, if one was found
 	DataURL       string                  // from the APD policy's data_url field, if one was found
+
+	// Infrastructure Catalogue (InfraCat) selection — SMPC only. InfraID is
+	// the caller-selected infra id; the rest are resolved from that infra's
+	// APD policy (rules.infrastructure), if FetchInfraPolicy found one.
+	InfraID                  string
+	InfraName                string
+	InfraRegion              string
+	InfraAttestationRequired bool
+	InfraAttestationService  string
+	InfraAttestationPolicyID string
+	InfraCPUCores            int
+	InfraRAMMB               int
 }
 
 // defaultComputeChoice maps a technique to its descriptive compute_choice
@@ -81,17 +93,43 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		})
 	}
 
+	// A real infra selection (SMPC, via InfraCat) yields a real party built
+	// from that infra's APD policy. TEE never sends an InfraID today, and any
+	// SMPC caller that predates InfraCat won't either — both fall back to the
+	// original placeholder so nothing else breaks.
 	infraProviders := []contract.InfraProviderParty{}
 	if in.Technique == "TEE" || in.Technique == "SMPC" {
-		infraProviders = append(infraProviders, contract.InfraProviderParty{
-			Name:   "Azure Confidential Compute",
-			Region: "UNKNOWN",
-			Attestation: contract.Attestation{
-				Required: true,
-				Service:  "MAA",
-			},
-			Constraints: contract.Constraints{AccessibilityLevel: "PUBLIC", RestrictedTo: []string{}},
-		})
+		if in.InfraID != "" {
+			infraName := in.InfraName
+			if infraName == "" {
+				infraName = "Unknown Infrastructure"
+			}
+			infraProviders = append(infraProviders, contract.InfraProviderParty{
+				ID:     in.InfraID,
+				Name:   infraName,
+				Region: in.InfraRegion,
+				Attestation: contract.Attestation{
+					Required: in.InfraAttestationRequired,
+					Service:  in.InfraAttestationService,
+					PolicyID: in.InfraAttestationPolicyID,
+				},
+				ResourceAllocation: contract.ResourceAllocation{
+					CPUCores: in.InfraCPUCores,
+					RAMMB:    in.InfraRAMMB,
+				},
+				Constraints: contract.Constraints{AccessibilityLevel: "PUBLIC", RestrictedTo: []string{}},
+			})
+		} else {
+			infraProviders = append(infraProviders, contract.InfraProviderParty{
+				Name:   "Azure Confidential Compute",
+				Region: "UNKNOWN",
+				Attestation: contract.Attestation{
+					Required: true,
+					Service:  "MAA",
+				},
+				Constraints: contract.Constraints{AccessibilityLevel: "PUBLIC", RestrictedTo: []string{}},
+			})
+		}
 	}
 
 	computeChoice := in.ComputeChoice
