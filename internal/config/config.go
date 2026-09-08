@@ -73,6 +73,9 @@ type Config struct {
 	// --- forms ingest (aaa pushes form data here; see httpapi/forms_ingest.go) ---
 	FormsPushToken string // FORMS_PUSH_TOKEN — shared secret aaa sends on pushes; empty disables the check
 
+	// --- participant-VM IP registry (httpapi/vm_registry.go) ---
+	VMRegistryToken string // VM_REGISTRY_TOKEN — shared secret terraform/participant-vm sends on vm-registry calls; empty disables the check
+
 	// --- TEE orchestrator (httpapi/tee_orchestrator.go) ---
 	// The confidential VM is pre-provisioned; the orchestrator starts and stops
 	// it rather than creating it. TEEEnclaveBaseURL overrides the URL built from
@@ -172,6 +175,8 @@ func Load() *Config {
 		OwnerSelfIPs: os.Getenv("OWNER_SELF_IPS"),
 
 		FormsPushToken: os.Getenv("FORMS_PUSH_TOKEN"),
+
+		VMRegistryToken: os.Getenv("VM_REGISTRY_TOKEN"),
 
 		TEEAzureRG:        os.Getenv("TEE_AZURE_RG"),
 		TEEVMName:         os.Getenv("TEE_VM_NAME"),

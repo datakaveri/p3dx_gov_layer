@@ -101,6 +101,16 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
 	r.Get("/final-model/summary", s.getFinalModelSummary)
+
+	// Participant-VM IP registry (vm_registry.go), called by
+	// terraform/participant-vm right after it creates each VM. Guarded by an
+	// optional shared secret — see requireVMRegistryToken.
+	r.Group(func(r chi.Router) {
+		r.Use(s.requireVMRegistryToken)
+		r.Post("/vm-registry", s.postVMRegistry)
+		r.Get("/vm-registry/output-owner", s.getOutputOwnerVM)
+		r.Get("/vm-registry/data-providers", s.getDataProviderVMs)
+	})
 }
 
 // corsMiddleware reproduces the always-allow CORS of app.js: reflect the request

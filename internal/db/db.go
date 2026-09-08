@@ -139,6 +139,17 @@ func (d *DB) migrate(ctx context.Context) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS pathway TEXT DEFAULT 'FL'`,
+		// One row per (role, participant_name): the IP of each participant VM
+		// that terraform/participant-vm registers after creating it. "user" rows
+		// are the output-owner(s); GetOutputOwnerVM returns the most recently
+		// updated one. See internal/db/vm_registry.go.
+		`CREATE TABLE IF NOT EXISTS vm_registry (
+			role TEXT NOT NULL,
+			participant_name TEXT NOT NULL,
+			ip_address TEXT NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (role, participant_name)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -149,6 +160,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table notifications ready")
 	log.Println("[DATABASE] Table session_reports ready")
 	log.Println("[DATABASE] Table contracts ready")
+	log.Println("[DATABASE] Table vm_registry ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }
