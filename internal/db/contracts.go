@@ -145,9 +145,8 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 			ValidFrom:  now,
 			ValidUntil: now.Add(90 * 24 * time.Hour),
 		},
-		Technique:         "FL",
-		ComputeChoice:     "FEDERATED_LEARNING",
-		ExecutionPlatform: "AZURE_AMD_SEV",
+		Technique:     "FL",
+		ComputeChoice: "FEDERATED_LEARNING",
 		Parties: contract.Parties{
 			User: contract.UserParty{
 				ID:        ownerUserID,
@@ -155,8 +154,10 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 				Signature: contract.Signature{SignedAt: &now},
 			},
 			DataProviders:        dataProviders,
+			DataProviderCount:    len(dataProviders),
 			ApplicationProviders: []contract.ApplicationProviderParty{},
 			InfraProviders:       []contract.InfraProviderParty{},
+			InfraProviderCount:   0,
 		},
 		SessionInfo: contract.SessionInfo{
 			ID:        submissionID,
@@ -242,7 +243,7 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 // signature forward via existingDataProviderSignatures, so it survives the
 // draft -> final-roster transition.
 
-// checks that the contarct is signed by the data providers and if they have signed or not ust updates 
+// checks that the contarct is signed by the data providers and if they have signed or not ust updates
 func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username string) (bool, error) {
 	raw, err := d.GetContractBySession(ctx, sessionID)
 	if err != nil || raw == nil {
@@ -283,7 +284,7 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 
 // GetContractBySession returns the stored contract for a session, or (nil, nil)
 // when none exists.
-//fetches the raw contract to get session id 
+// fetches the raw contract to get session id
 func (d *DB) GetContractBySession(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	var raw json.RawMessage
 	err := d.Pool.QueryRow(ctx, `SELECT contract FROM contracts WHERE session_id = $1`, sessionID).Scan(&raw)

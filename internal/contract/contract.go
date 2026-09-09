@@ -74,10 +74,20 @@ type Attestation struct {
 }
 
 // ResourceAllocation is the compute footprint reserved for the workload.
+// The 5 confidential-computing flags are computed once at infra-provider
+// registration time (InfraPolicyForm.jsx, OR'd across that infra's own node
+// pools/VM instance) and stored flat on the policy — this struct's
+// population (contractgen.go) just copies them through, no classification
+// logic on the Go side.
 type ResourceAllocation struct {
-	CPUCores int    `json:"cpu_cores"`
-	RAMMB    int    `json:"ram_mb"`
-	GPU      string `json:"gpu"`
+	CPUCores            int    `json:"cpu_cores"`
+	RAMMB               int    `json:"ram_mb"`
+	GPU                 string `json:"gpu"`
+	SGXEnabled          bool   `json:"sgx_enabled"`
+	TDXEnabled          bool   `json:"tdx_enabled"`
+	SEVSNPEnabled       bool   `json:"sev_snp_enabled"`
+	SEVEnabled          bool   `json:"sev_enabled"`
+	NitroEnclaveEnabled bool   `json:"nitro_enclave_enabled"`
 }
 
 // InfraProviderParty is one compute/hosting contributor (e.g. a confidential
@@ -95,12 +105,16 @@ type InfraProviderParty struct {
 // Parties groups every party to the contract. DataProviders,
 // ApplicationProviders, and InfraProviders are always present as arrays
 // (possibly empty) rather than omitted, so every pathway (FL, TEE, SMPC)
-// produces the same shape.
+// produces the same shape. DataProviderCount/InfraProviderCount are plain
+// sibling counts (always len(DataProviders)/len(InfraProviders)) rather than
+// restructuring either array into an index-keyed object.
 type Parties struct {
 	User                 UserParty                  `json:"user"`
 	DataProviders        []DataProviderParty        `json:"data_providers"`
+	DataProviderCount    int                        `json:"data_provider_count"`
 	ApplicationProviders []ApplicationProviderParty `json:"application_providers"`
 	InfraProviders       []InfraProviderParty       `json:"infra_providers"`
+	InfraProviderCount   int                        `json:"infra_provider_count"`
 }
 
 // Lifecycle is the contract's validity window.
@@ -121,16 +135,15 @@ type SessionInfo struct {
 // session/roster builder and the FL/TEE/SMPC generate-contract preview
 // builder.
 type Contract struct {
-	ProjectID         string      `json:"project_id"`
-	ContractID        string      `json:"contract_id"`
-	Version           int         `json:"version"`
-	Lifecycle         Lifecycle   `json:"lifecycle"`
-	Technique         string      `json:"technique"`
-	ComputeChoice     string      `json:"compute_choice"`
-	ExecutionPlatform string      `json:"execution_platform"`
-	Parties           Parties     `json:"parties"`
-	SessionInfo       SessionInfo `json:"session_info"`
-	ContractHash      string      `json:"contract_hash,omitempty"`
+	ProjectID     string      `json:"project_id"`
+	ContractID    string      `json:"contract_id"`
+	Version       int         `json:"version"`
+	Lifecycle     Lifecycle   `json:"lifecycle"`
+	Technique     string      `json:"technique"`
+	ComputeChoice string      `json:"compute_choice"`
+	Parties       Parties     `json:"parties"`
+	SessionInfo   SessionInfo `json:"session_info"`
+	ContractHash  string      `json:"contract_hash,omitempty"`
 }
 
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with

@@ -262,7 +262,7 @@ All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS ena
 8. Retrieve final models and report
 
 **General Pathway Flow:**
-1. Build contract externally (arbitrary `compute_choice`, `execution_platform`)
+1. Build contract externally (arbitrary `compute_choice`)
 2. Get user's Keycloak token
 3. Sign contract with user's private key
 4. POST to `/contract` with signed contract
