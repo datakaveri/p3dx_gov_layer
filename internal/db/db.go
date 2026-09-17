@@ -122,15 +122,17 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
-		// Contracts assembled when the output owner selects providers. One row per
-		// session (session_id = form submission id); project_id is generated once
-		// and reused, so only parties_involved changes between the initial
-		// (participation-request) contract and the final (roster) contract.
-		// pathway distinguishes FL contracts (with forms flow) from GENERAL contracts (with policy checks).
+		// Contracts assembled when the output owner selects providers. One row
+		// per contract build: BuildContract mints a fresh project_id/contract_id
+		// on every call, so a session (session_id = form submission id)
+		// accumulates a new row for its initial (participation-request)
+		// contract, its final (roster) contract, and any "Start Again" restart -
+		// none of them reuse a previous row. pathway distinguishes FL contracts
+		// (with forms flow) from GENERAL contracts (with policy checks).
 		`CREATE TABLE IF NOT EXISTS contracts (
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL,
-			session_id TEXT UNIQUE NOT NULL,
+			session_id TEXT NOT NULL,
 			output_owner_id TEXT,
 			finalized BOOLEAN DEFAULT false,
 			pathway TEXT DEFAULT 'FL',
@@ -150,6 +152,44 @@ func (d *DB) migrate(ctx context.Context) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (role, participant_name)
 		)`,
+		// One row per contract build, recording the project_id assigned in
+		// contracts (see BuildContract) alongside who is participating: the
+		// output owner and the data-provider parties on that specific contract.
+		// Populated for every contract - draft, final, and "Start Again"
+		// restarts alike - via UpsertProject in projects.go, always as a new
+		// row since project_id is always freshly minted.
+		`CREATE TABLE IF NOT EXISTS projects (
+			project_id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			output_owner_username TEXT,
+			data_provider_usernames JSONB NOT NULL DEFAULT '[]',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		// "Start Again" (restart-fl-session) mints a new project_id/contract_id
+		// for the same session rather than overwriting the previous project, so
+		// a session can now have several contracts/projects (its restart
+		// history). Drop the old one-row-per-session uniqueness and instead
+		// enforce uniqueness per project_id, which is what the upserts below key
+		// on now.
+		`ALTER TABLE contracts DROP CONSTRAINT IF EXISTS contracts_session_id_key`,
+		`ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_session_id_key`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint WHERE conname = 'contracts_project_id_key'
+			) THEN
+				ALTER TABLE contracts ADD CONSTRAINT contracts_project_id_key UNIQUE (project_id);
+			END IF;
+		END $$`,
+		`CREATE INDEX IF NOT EXISTS contracts_session_id_idx ON contracts(session_id)`,
+		`CREATE INDEX IF NOT EXISTS projects_session_id_idx ON projects(session_id)`,
+		// StoreGeneratedContract (preview contracts, keyed by a synthetic
+		// "preview:<consumer>:<dataset>:<technique>" session_id) still needs
+		// regenerating the same selection to overwrite rather than accumulate -
+		// scope that uniqueness to just those rows so it doesn't reintroduce the
+		// one-row-per-real-session limit dropped above.
+		`CREATE UNIQUE INDEX IF NOT EXISTS contracts_preview_session_id_key ON contracts(session_id) WHERE session_id LIKE 'preview:%'`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {

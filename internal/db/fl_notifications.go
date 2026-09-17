@@ -15,6 +15,37 @@ import (
 const notificationColumns = `id, recipient_id, recipient_username, sender_username,
 	message, payload, read, read_at, created_at, response, response_message, responded_at`
 
+// This Postgres server's session timezone is Asia/Kolkata (see `SHOW
+// timezone`), so a "timestamp without time zone" column like created_at
+// stores raw IST wall-clock digits with no zone attached. pgx always decodes
+// that column type with a UTC Location regardless of the server's actual
+// timezone, so without correction the JSON response tags an IST reading as
+// "...Z" (UTC) and the browser then applies the IST offset a second time on
+// display. asIST re-tags the same wall-clock digits with the correct zone so
+// marshaling emits the right offset instead.
+var istLocation = func() *time.Location {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		return time.FixedZone("IST", 5*3600+1800)
+	}
+	return loc
+}()
+
+func asIST(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	fixed := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), istLocation)
+	return &fixed
+}
+
+// fixTimezones re-tags every timestamp field scanned off this row - see asIST.
+func (n *Notification) fixTimezones() {
+	n.ReadAt = asIST(n.ReadAt)
+	n.CreatedAt = asIST(n.CreatedAt)
+	n.RespondedAt = asIST(n.RespondedAt)
+}
+
 // Notification is one row of notifications (used by get/markRead, which return
 // the full row to clients).
 type Notification struct {
@@ -79,7 +110,14 @@ func (d *DB) GetNotificationsForUser(ctx context.Context, username string) ([]No
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[Notification])
+	notifications, err := pgx.CollectRows(rows, pgx.RowToStructByName[Notification])
+	if err != nil {
+		return nil, err
+	}
+	for i := range notifications {
+		notifications[i].fixTimezones()
+	}
+	return notifications, nil
 }
 
 // MarkNotificationAsRead flags a notification read for its owner, returning the
@@ -98,6 +136,7 @@ func (d *DB) MarkNotificationAsRead(ctx context.Context, notificationID, usernam
 	if err != nil {
 		return nil, err
 	}
+	n.fixTimezones()
 	return &n, nil
 }
 
@@ -121,6 +160,7 @@ func (d *DB) RespondToNotification(ctx context.Context, notificationID, username
 	if err != nil {
 		return nil, err
 	}
+	n.fixTimezones()
 	return &n, nil
 }
 
@@ -133,5 +173,12 @@ func (d *DB) GetNotificationsBySender(ctx context.Context, senderUsername string
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[Notification])
+	notifications, err := pgx.CollectRows(rows, pgx.RowToStructByName[Notification])
+	if err != nil {
+		return nil, err
+	}
+	for i := range notifications {
+		notifications[i].fixTimezones()
+	}
+	return notifications, nil
 }

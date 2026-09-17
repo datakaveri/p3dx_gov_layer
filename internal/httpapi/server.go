@@ -91,6 +91,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// the AAA layer on the participation request (finalize=false) and again on
 	// the Final Roster send (finalize=true).
 	r.Post("/contracts", s.postContract)
+	r.Get("/contracts/by-project/{projectId}", s.getContractByProject)
+
+	// Project record (projects.go): the project_id + participants tracked
+	// against a session once the final roster contract is stored. Only the
+	// id is exposed here - see getProject.
+	r.Get("/projects/{sessionId}", s.getProject)
+	r.Get("/projects", s.getProjects)
 
 	// Builds and returns an unsigned contract for display given just a
 	// dataset + technique selection (generate_contract.go). Does not sign,
