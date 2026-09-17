@@ -39,30 +39,6 @@ func NewUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// existingProjectID returns the project_id already assigned to this session's
-// contract, or "" if none exists yet. This keeps project_id stable across the
-// initial and final contracts for the same session.
-func (d *DB) existingProjectID(ctx context.Context, sessionID string) string {
-	var pid string
-	err := d.Pool.QueryRow(ctx, `SELECT project_id FROM contracts WHERE session_id = $1`, sessionID).Scan(&pid)
-	if err != nil {
-		return ""
-	}
-	return pid
-}
-
-// existingContractID returns the contract_id stored inside this session's
-// contract JSON, or "" if none exists yet. This keeps contract_id stable across
-// the initial and final contracts for the same session.
-func (d *DB) existingContractID(ctx context.Context, sessionID string) string {
-	var cid string
-	err := d.Pool.QueryRow(ctx, `SELECT contract->>'contract_id' FROM contracts WHERE session_id = $1`, sessionID).Scan(&cid)
-	if err != nil {
-		return ""
-	}
-	return cid
-}
-
 // existingDataProviderSignatures returns username -> signed_at for every
 // already-signed data-provider party on this session's currently stored
 // contract. A provider signs by accepting their participation notification
@@ -90,10 +66,15 @@ func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID strin
 
 // BuildContract assembles a contract for the given submission session ID and parties.
 // Since forms are now stored in APD only, dataset fields from provider forms are
-// left blank. It reuses an already-assigned project_id and contract_id for
-// the session so only the parties change between the initial and final contracts.
+// left blank. Every call mints a brand-new project_id and contract_id - a
+// contract is never reused across calls, so the initial (finalize=false) and
+// final-roster (finalize=true) contracts for one session are always two
+// distinct projects, and a "Start Again" restart is just another such call.
 // finalize sets version=2 (the final roster contract) vs. version=1 (the draft).
 // pathway indicates whether this is an FL contract (with forms flow) or GENERAL (with policy checks).
+// Prior data-provider signatures are still carried forward from the session's
+// most recent contract, since a restart reuses the same accepted roster
+// without redoing invite/accept.
 func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway string) (*contract.Contract, error) {
 	if pathway == "" {
 		pathway = "FL"
@@ -121,14 +102,8 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		ownerUserID = submissionID
 	}
 
-	projectID := d.existingProjectID(ctx, submissionID)
-	if projectID == "" {
-		projectID = newID("proj", 9)
-	}
-	contractID := d.existingContractID(ctx, submissionID)
-	if contractID == "" {
-		contractID = NewUUID()
-	}
+	projectID := newID("proj", 9)
+	contractID := NewUUID()
 	version := 1
 	if finalize {
 		version = 2
@@ -174,7 +149,10 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	return c, nil
 }
 
-// StoreContract upserts a contract keyed by session_id (one contract per session).
+// StoreContract upserts a contract keyed by project_id (one contract per
+// project; every BuildContract call mints a fresh project_id, so a session
+// accumulates a new project per contract build - draft, final, and any
+// "Start Again" restart each get their own row).
 // finalized marks the final roster contract vs. the initial participation-request
 // draft. pathway indicates FL or GENERAL. Returns the contract row id.
 func (d *DB) StoreContract(ctx context.Context, c *contract.Contract, finalized bool, pathway string) (string, error) {
@@ -189,7 +167,7 @@ func (d *DB) StoreContract(ctx context.Context, c *contract.Contract, finalized 
 	err = d.Pool.QueryRow(ctx, `INSERT INTO contracts
 			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (session_id) DO UPDATE SET
+		ON CONFLICT (project_id) DO UPDATE SET
 			output_owner_id = EXCLUDED.output_owner_id,
 			finalized = contracts.finalized OR EXCLUDED.finalized,
 			pathway = EXCLUDED.pathway,
@@ -217,7 +195,7 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 	err := d.Pool.QueryRow(ctx, `INSERT INTO contracts
 			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
 			VALUES ($1, $2, $3, $4, false, 'PREVIEW', $5)
-		ON CONFLICT (session_id) DO UPDATE SET
+		ON CONFLICT (session_id) WHERE session_id LIKE 'preview:%' DO UPDATE SET
 			project_id = EXCLUDED.project_id,
 			output_owner_id = EXCLUDED.output_owner_id,
 			finalized = false,
@@ -245,7 +223,15 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 
 // checks that the contarct is signed by the data providers and if they have signed or not ust updates
 func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username string) (bool, error) {
-	raw, err := d.GetContractBySession(ctx, sessionID)
+	var contractRowID string
+	var raw json.RawMessage
+	err := d.Pool.QueryRow(ctx,
+		`SELECT id, contract FROM contracts WHERE session_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+		sessionID,
+	).Scan(&contractRowID, &raw)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
 	if err != nil || raw == nil {
 		return false, err
 	}
@@ -271,9 +257,12 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 	if err != nil {
 		return false, err
 	}
+	// Target the specific row by id, not by session_id - a session can now have
+	// several contract rows (restart history), and only the latest (fetched
+	// above) should be signed.
 	_, err = d.Pool.Exec(ctx,
-		`UPDATE contracts SET contract = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2`,
-		updated, sessionID,
+		`UPDATE contracts SET contract = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		updated, contractRowID,
 	)
 	if err != nil {
 		return false, err
@@ -282,12 +271,31 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 	return true, nil
 }
 
-// GetContractBySession returns the stored contract for a session, or (nil, nil)
-// when none exists.
-// fetches the raw contract to get session id
+// GetContractBySession returns the most recently updated stored contract for a
+// session, or (nil, nil) when none exists. A session can have several contract
+// rows (draft, final, and any "Start Again" restarts, each its own project);
+// this always returns the current/latest one.
 func (d *DB) GetContractBySession(ctx context.Context, sessionID string) (json.RawMessage, error) {
 	var raw json.RawMessage
-	err := d.Pool.QueryRow(ctx, `SELECT contract FROM contracts WHERE session_id = $1`, sessionID).Scan(&raw)
+	err := d.Pool.QueryRow(ctx, `SELECT contract FROM contracts WHERE session_id = $1 ORDER BY updated_at DESC LIMIT 1`, sessionID).Scan(&raw)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// GetContractByProjectID returns the stored contract for one specific
+// project, or (nil, nil) when none exists. Unlike GetContractBySession
+// (which only ever returns a session's latest contract), this fetches the
+// exact contract for a given project_id - needed since a session now
+// accumulates several projects (see BuildContract, which mints a fresh
+// project_id on every call) and the UI lets a user view any one of them.
+func (d *DB) GetContractByProjectID(ctx context.Context, projectID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	err := d.Pool.QueryRow(ctx, `SELECT contract FROM contracts WHERE project_id = $1`, projectID).Scan(&raw)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}

@@ -11,12 +11,14 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
 
-// POST /contracts — assemble the contract for a session and store it (one row per
-// session). Called by the AAA layer both when the owner sends the participation
-// request (finalize=false) and when the owner sends the final roster
-// (finalize=true). ip/port and the FL config are filled server-side; provider
-// user_ids come from Keycloak via the parties list, the owner user_id from
-// output_owner_user_id (req.user.sub). project_id is generated once per session.
+// POST /contracts — assemble a contract and store it as its own project (one
+// row per contract, never reused). Called by the AAA layer both when the
+// owner sends the participation request (finalize=false) and when the owner
+// sends the final roster (finalize=true), as well as by "Start Again"
+// (p3dx-aaa's /gov/restart-fl-session). ip/port and the FL config are filled
+// server-side; provider user_ids come from Keycloak via the parties list, the
+// owner user_id from output_owner_user_id (req.user.sub). A new project_id is
+// generated on every call.
 func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SubmissionID      string                  `json:"submission_id"`
@@ -34,7 +36,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// thsi will build the contract  and 
+	// thsi will build the contract  and
 	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL")
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -50,7 +52,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//contract gets stored in db 
+	//contract gets stored in db
 	contractID, err := s.db.StoreContract(reqCtx(r), contract, body.Finalize, "FL")
 	if err != nil {
 		log.Println("[GOVERNANCE] Error storing contract:", err)
@@ -58,6 +60,16 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
 		})
 		return
+	}
+
+	// Record this contract's project_id linked to the data providers on it.
+	// Best-effort: bookkeeping shouldn't fail the contract build/finalization.
+	usernames := make([]string, 0, len(body.Parties))
+	for _, p := range body.Parties {
+		usernames = append(usernames, p.Username)
+	}
+	if err := s.db.UpsertProject(reqCtx(r), contract.ProjectID, contract.SessionInfo.SessionID, contract.Parties.User.ID, usernames); err != nil {
+		log.Println("[GOVERNANCE] Error recording project participants:", err)
 	}
 
 	//like a contract payload is sent to the client with the status code 201
@@ -89,4 +101,68 @@ func (s *Server) getContract(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"SUCCESS","contract":`))
 	_, _ = w.Write(raw)
 	_, _ = w.Write([]byte(`}`))
+}
+
+// GET /contracts/by-project/{projectId} — return the stored contract for one
+// specific project (not just a session's latest one - see
+// GetContractByProjectID). Used by the owner's Projects page to view the
+// exact contract behind any one project card.
+func (s *Server) getContractByProject(w http.ResponseWriter, r *http.Request) {
+	projectID := chi.URLParam(r, "projectId")
+	raw, err := s.db.GetContractByProjectID(reqCtx(r), projectID)
+	if err != nil {
+		log.Println("[GOVERNANCE] Error retrieving contract by project:", err)
+		writeJSON(w, http.StatusInternalServerError, j{
+			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
+		})
+		return
+	}
+	if raw == nil {
+		writeJSON(w, http.StatusNotFound, j{
+			"status": "FAILED", "error": "NOT_FOUND", "message": "No contract for this project",
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"SUCCESS","contract":`))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte(`}`))
+}
+
+// GET /projects/{sessionId} — return only the project_id recorded for a
+// session (not the participant roster - that stays internal to governance).
+func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionId")
+	projectID, err := s.db.GetProjectIDBySession(reqCtx(r), sessionID)
+	if err != nil {
+		log.Println("[GOVERNANCE] Error retrieving project:", err)
+		writeJSON(w, http.StatusInternalServerError, j{
+			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
+		})
+		return
+	}
+	if projectID == "" {
+		writeJSON(w, http.StatusNotFound, j{
+			"status": "FAILED", "error": "NOT_FOUND", "message": "No project for this session",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "project_id": projectID})
+}
+
+// GET /projects?owner={username} — list projects. With owner set, only that
+// owner's projects (the output-owner's own "Projects" view); omitted, every
+// project (the fl-orchestrator's view).
+func (s *Server) getProjects(w http.ResponseWriter, r *http.Request) {
+	owner := r.URL.Query().Get("owner")
+	projects, err := s.db.ListProjects(reqCtx(r), owner)
+	if err != nil {
+		log.Println("[GOVERNANCE] Error listing projects:", err)
+		writeJSON(w, http.StatusInternalServerError, j{
+			"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "projects": projects})
 }
