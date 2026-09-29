@@ -271,6 +271,20 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 	return true, nil
 }
 
+// UpdateContractByProjectID overwrites the stored contract JSON for one
+// project_id (for a generated TEE contract, project_id is its contract_id —
+// see StoreGeneratedContract). Returns false when no such row exists.
+func (d *DB) UpdateContractByProjectID(ctx context.Context, projectID string, raw json.RawMessage) (bool, error) {
+	tag, err := d.Pool.Exec(ctx,
+		`UPDATE contracts SET contract = $1, updated_at = CURRENT_TIMESTAMP WHERE project_id = $2`,
+		raw, projectID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // GetContractBySession returns the most recently updated stored contract for a
 // session, or (nil, nil) when none exists. A session can have several contract
 // rows (draft, final, and any "Start Again" restarts, each its own project);

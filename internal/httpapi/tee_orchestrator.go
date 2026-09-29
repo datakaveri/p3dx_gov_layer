@@ -208,6 +208,14 @@ func (s *Server) doProvisionTEE(ctx context.Context, contract *services.TEEContr
 		return nil, nil, &teeAPIError{Status: http.StatusBadRequest, Code: "INVALID_CONTRACT", Message: err.Error()}
 	}
 
+	// No TEE runs until every data provider has signed the generated
+	// contract (tee_contract_signing.go). Checked before any VM is started.
+	if s.cfg.TEERequireSignedContract {
+		if err := s.requireSignedContract(ctx, contract); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if s.cfg.TEEAzureRG == "" || s.cfg.TEEVMName == "" {
 		return nil, nil, &teeAPIError{
 			Status: http.StatusInternalServerError, Code: "TEE_NOT_CONFIGURED",

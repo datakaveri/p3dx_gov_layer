@@ -24,8 +24,18 @@ import (
 // and each data-provider party is signed when they accept the participation
 // notification (db.SignDataProviderParty, called from
 // httpapi.respondToNotification).
+//
+// For the TEE pathway, each data-provider party instead signs the contract's
+// ContractHash with their own RSA private key (httpapi.handleSignTEEContract),
+// and the verified signature bytes are recorded in Value alongside the hash
+// that was signed. The whole block is blanked by ComputeHash, so recording a
+// signature never changes the hash being signed.
 type Signature struct {
-	SignedAt *time.Time `json:"signed_at"`
+	SignedAt   *time.Time `json:"signed_at"`
+	Signer     string     `json:"signer,omitempty"`      // Keycloak username whose public key verifies Value
+	Algorithm  string     `json:"algorithm,omitempty"`   // e.g. "RSASSA-PKCS1-v1_5-SHA256"
+	SignedHash string     `json:"signed_hash,omitempty"` // the ContractHash string that was signed
+	Value      string     `json:"value,omitempty"`       // base64 signature bytes
 }
 
 // Constraints bounds who/what may access a party's contribution.

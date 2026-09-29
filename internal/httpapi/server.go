@@ -21,6 +21,7 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/keycloak"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/userdir"
 )
 
 // maxBodyBytes mirrors express.json({ limit: "5mb" }).
@@ -38,6 +39,10 @@ type Server struct {
 	// teeSessions tracks the provision->attest->run->output sequences started
 	// by POST /v1/tee/sessions (tee_session.go).
 	teeSessions *teeSessionRegistry
+	// publicKeys resolves a data provider's registered public key from the
+	// platform Keycloak, to verify TEE contract signatures
+	// (tee_contract_signing.go).
+	publicKeys publicKeyLookup
 }
 
 // New builds the Server.
@@ -50,6 +55,7 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
 		http:        &http.Client{},
 		tees:        newTEERegistry(),
 		teeSessions: newTEESessionRegistry(),
+		publicKeys:  userdir.New(cfg),
 	}
 }
 
@@ -104,6 +110,11 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// store, or deploy — that's still gated on POST /contract above, once
 	// the consumer-signing model is resolved.
 	r.Post("/generate-contract", s.handleGenerateContract)
+
+	// TEE contract signing (tee_contract_signing.go): a data provider posts
+	// their RSA signature over a generated TEE contract's hash.
+	r.Post("/tee-contracts/{contractId}/sign", s.handleSignTEEContract)
+	r.Get("/tee-contracts/{contractId}/signatures", s.getTEEContractSignatures)
 
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
