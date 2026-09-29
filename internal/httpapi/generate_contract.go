@@ -108,6 +108,14 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 			if req.ProviderID != "" {
 				in.ProviderID = req.ProviderID
 				in.ProviderName = lookupProvider(req.ProviderID).Name
+			} else if req.Technique == "TEE" {
+				// TEE: the dataset's own APD policy names its provider — that
+				// provider_id is who gets sent the contract to sign below.
+				in.ProviderID, _ = policy["provider_id"].(string)
+				in.ProviderName, _ = policy["provider_email"].(string)
+				if in.ProviderName == "" {
+					in.ProviderName = in.ProviderID
+				}
 			}
 		}
 		datasetInputs = append(datasetInputs, in)
@@ -200,18 +208,34 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	sort.Strings(sortedDatasetIDs)
 	datasetKey := strings.Join(sortedDatasetIDs, "+")
 
+	stored := false
 	if contractJSON, err := json.Marshal(contract); err == nil {
 		if _, dbErr := s.db.StoreGeneratedContract(r.Context(), consumerID, datasetKey, req.Technique, contract.ContractID, contractJSON); dbErr != nil {
 			log.Printf("[GOVERNANCE] Warning: Failed to store generated contract in DB: %v", dbErr)
+		} else {
+			stored = true
 		}
 	} else {
 		log.Printf("[GOVERNANCE] Warning: Failed to marshal generated contract for storage: %v", err)
 	}
 
-	log.Printf("[GENERATE] Contract generated (unsigned): datasets=%s technique=%s", datasetKey, req.Technique)
+	log.Printf("[GENERATE] Contract generated (unsigned): datasets=%s technique=%s hash=%s", datasetKey, req.Technique, contract.ContractHash)
+
+	// TEE: send the hash + contract to each participating data provider to
+	// sign (tee_contract_signing.go). Only once stored — signing verifies
+	// against the stored copy, so an unstored contract could never be signed.
+	signRequestsSent := 0
+	if req.Technique == "TEE" && stored && contract.ContractHash != "" {
+		sender, _ := claims["preferred_username"].(string)
+		if sender == "" {
+			sender = consumerID
+		}
+		signRequestsSent = s.notifyTEEContractSigners(r.Context(), contract, sender)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":   "success",
-		"contract": contract,
+		"status":             "success",
+		"contract":           contract,
+		"sign_requests_sent": signRequestsSent,
 	})
 }

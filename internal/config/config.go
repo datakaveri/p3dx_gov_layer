@@ -101,6 +101,21 @@ type Config struct {
 	TEEAttestTimeout       time.Duration // TEE_ATTEST_TIMEOUT_MS (default 180000) — attestation is slow
 	TEEClockLeeway         time.Duration // TEE_CLOCK_LEEWAY_MS (default 60000)
 
+	// TEERequireSignedContract defaults to TRUE: a TEE is never provisioned
+	// unless the run names a generated TEE contract (governanceContractId)
+	// that every data provider has signed, each signature verified against
+	// that provider's Keycloak public key (tee_contract_signing.go).
+	TEERequireSignedContract bool // TEE_REQUIRE_SIGNED_CONTRACT (default true)
+
+	// --- user directory (the platform's own Keycloak, where p3dx-aaa keeps
+	// users and each data provider's "public_key" attribute). Distinct from
+	// the KEYCLOAK_* service account above, which targets the FL receivers'
+	// Keycloak. Admin credentials mirror p3dx-aaa's KEYCLOAK_ADMIN_*.
+	UserKeycloakBaseURL       string // USER_KEYCLOAK_BASE_URL (default http://localhost:8080)
+	UserKeycloakRealm         string // USER_KEYCLOAK_REALM (default "master")
+	UserKeycloakAdminUser     string // USER_KEYCLOAK_ADMIN_USER
+	UserKeycloakAdminPassword string // USER_KEYCLOAK_ADMIN_PASSWORD
+
 	// --- ad-hoc VM provisioning (httpapi/vm_provision.go) ---
 	// Unlike the TEE flow above, this creates a brand-new VM per request
 	// rather than starting a pre-provisioned one.
@@ -193,6 +208,13 @@ func Load() *Config {
 		TEEAttestationTTL:      getEnvMS("TEE_ATTESTATION_TTL_MS", 900000),
 		TEEAttestTimeout:       getEnvMS("TEE_ATTEST_TIMEOUT_MS", 180000),
 		TEEClockLeeway:         getEnvMS("TEE_CLOCK_LEEWAY_MS", 60000),
+
+		TEERequireSignedContract: getEnvBool("TEE_REQUIRE_SIGNED_CONTRACT", true),
+
+		UserKeycloakBaseURL:       getEnv("USER_KEYCLOAK_BASE_URL", "http://localhost:8080"),
+		UserKeycloakRealm:         getEnv("USER_KEYCLOAK_REALM", "master"),
+		UserKeycloakAdminUser:     os.Getenv("USER_KEYCLOAK_ADMIN_USER"),
+		UserKeycloakAdminPassword: os.Getenv("USER_KEYCLOAK_ADMIN_PASSWORD"),
 	}
 	return c
 }

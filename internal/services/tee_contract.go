@@ -22,6 +22,12 @@ import (
 // TEEContract is the signed instruction to run a workload in a TEE.
 type TEEContract struct {
 	ContractID string `json:"contractId"`
+
+	// GovernanceContractID names the gov_layer-generated TEE contract
+	// (POST /generate-contract) this run executes. With
+	// TEE_REQUIRE_SIGNED_CONTRACT on, provisioning is refused unless every
+	// data provider on that contract has a valid signature over its hash.
+	GovernanceContractID string `json:"governanceContractId,omitempty"`
 	RequestID  string `json:"requestId"`
 
 	ConsumerID string `json:"consumerId"`
