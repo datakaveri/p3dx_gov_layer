@@ -21,6 +21,7 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/keycloak"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/userdir"
 )
 
@@ -29,9 +30,9 @@ const maxBodyBytes = 5 * 1024 * 1024
 
 // Server bundles the dependencies shared by every handler.
 type Server struct {
-	cfg *config.Config
-	db  *db.DB
-	kc  *keycloak.Client
+	cfg  *config.Config
+	db   *db.DB
+	kc   *keycloak.Client
 	http *http.Client
 	// tees tracks live TEE instances for the orchestrator API
 	// (tee_orchestrator.go).
@@ -40,13 +41,15 @@ type Server struct {
 	// by POST /v1/tee/sessions (tee_session.go).
 	teeSessions *teeSessionRegistry
 	// publicKeys resolves a data provider's registered public key from the
-	// platform Keycloak, to verify TEE contract signatures
-	// (tee_contract_signing.go).
+	// platform Keycloak, to verify contract signatures (contract_signing.go).
 	publicKeys publicKeyLookup
+	// govKey is gov_layer's own key pair; it signs each contract hash before
+	// the hash goes out to data providers (contract_signing.go).
+	govKey *services.GovernanceKey
 }
 
 // New builds the Server.
-func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
+func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *services.GovernanceKey) *Server {
 	return &Server{
 		cfg: cfg,
 		db:  database,
@@ -56,6 +59,7 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client) *Server {
 		tees:        newTEERegistry(),
 		teeSessions: newTEESessionRegistry(),
 		publicKeys:  userdir.New(cfg),
+		govKey:      govKey,
 	}
 }
 
@@ -75,7 +79,7 @@ func (s *Server) Handler() http.Handler {
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments
 // (export, by-submission) precede param routes; chi resolves them correctly.
-//helps to hit url to the respective handler 
+// helps to hit url to the respective handler
 func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/data-providers", s.getDataProviders)
 	r.Post("/send-provider-message", s.sendProviderMessage)
@@ -89,7 +93,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 
 	// Single contract endpoint for both pathways:
 	// Routes to FL, TEE, or SMPC orchestration based on technique field
-		r.Post("/contract", s.handleContract)
+	r.Post("/contract", s.handleContract)
 	r.Get("/contract/{sessionId}", s.getContract)
 
 	// FL session/roster contract (contracts.go): assembles + stores the
@@ -102,6 +106,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// Project record (projects.go): the project_id + participants tracked
 	// against a session once the final roster contract is stored. Only the
 	// id is exposed here - see getProject.
+	//
 	r.Get("/projects/{sessionId}", s.getProject)
 	r.Get("/projects", s.getProjects)
 
@@ -109,13 +114,16 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// dataset + technique selection (generate_contract.go). Does not sign,
 	// store, or deploy — that's still gated on POST /contract above, once
 	// the consumer-signing model is resolved.
+	//generate_contract.go
 	r.Post("/generate-contract", s.handleGenerateContract)
 
-	// TEE contract signing (tee_contract_signing.go): a data provider posts
-	// their RSA signature over a generated TEE contract's hash.
-	r.Post("/tee-contracts/{contractId}/sign", s.handleSignTEEContract)
-	r.Get("/tee-contracts/{contractId}/signatures", s.getTEEContractSignatures)
-
+	// Contract signing for every technique (contract_signing.go): a data
+	// provider posts their RSA signature over a contract's hash; the
+	// signatures routes report who has signed (FL looks it up by session).
+	r.Post("/contracts/{contractId}/sign", s.handleSignContract)
+	r.Get("/contracts/{contractId}/signatures", s.getContractSignatures)
+	r.Get("/contracts/by-session/{sessionId}/signatures", s.getSessionContractSignatures)
+	//for the model.go
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
 	r.Get("/final-model/summary", s.getFinalModelSummary)
@@ -134,7 +142,7 @@ func (s *Server) registerRoutes(r chi.Router) {
 // corsMiddleware reproduces the always-allow CORS of app.js: reflect the request
 // Origin, advertise GET/POST/OPTIONS + Content-Type/Authorization, and answer
 // preflight with 204. A log line is emitted per request, like the Node version.
-//thsi is teh place where a request hit the server 
+// thsi is teh place where a request hit the server
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -168,7 +176,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // decodeJSON reads and decodes a JSON request body (capped at 5MB) into dst.
-// this will reject the json 
+// this will reject the json
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	return json.NewDecoder(r.Body).Decode(dst)
@@ -180,7 +188,7 @@ func reqCtx(r *http.Request) context.Context { return r.Context() }
 // readBody decodes a JSON request body into dst. An empty body is treated as
 // an empty object (matching express.json). A genuine JSON syntax error
 // responds 400 INVALID_JSON and returns false.
-// tihs will prase the incoming json file 
+// tihs will prase the incoming json file
 func (s *Server) readBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	err := decodeJSON(w, r, dst)
 	if err != nil && !errors.Is(err, io.EOF) {

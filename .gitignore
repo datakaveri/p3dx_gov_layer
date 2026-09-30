@@ -7,3 +7,6 @@
 
 # Node.js (legacy; the service is now Go-only)
 node_modules/
+
+# Governance contract-signing key pair (generated on first start)
+keys/governance_signing_key.pem

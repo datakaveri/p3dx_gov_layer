@@ -51,7 +51,9 @@ func signWith(t *testing.T, priv *rsa.PrivateKey, hash string) string {
 	return base64.StdEncoding.EncodeToString(sig)
 }
 
-func twoProviderContract(t *testing.T) contract.Contract {
+// twoProviderContract builds a hashed TEE contract that srv has
+// governance-signed, ready for its two providers to sign.
+func twoProviderContract(t *testing.T, srv *Server) contract.Contract {
 	t.Helper()
 	c := contract.Contract{
 		ContractID: "c-1",
@@ -66,6 +68,9 @@ func twoProviderContract(t *testing.T) contract.Contract {
 		t.Fatal(err)
 	}
 	c.ContractHash = h
+	if err := srv.governanceSign(&c); err != nil {
+		t.Fatal(err)
+	}
 	return c
 }
 
@@ -93,7 +98,7 @@ func TestVerifyContractSignatures(t *testing.T) {
 	srv.publicKeys = stubKeys{"alice": alicePub, "bob": bobPub}
 	ctx := context.Background()
 
-	c := twoProviderContract(t)
+	c := twoProviderContract(t, srv)
 	sign(&c, 0, "alice", signWith(t, alice, c.ContractHash))
 	if _, _, all := srv.verifyContractSignatures(ctx, &c); all {
 		t.Fatal("all_signed with bob still unsigned")
@@ -120,6 +125,18 @@ func TestVerifyContractSignatures(t *testing.T) {
 		t.Fatal("alice signing bob's party was accepted")
 	}
 
+	// Without a valid governance signature the contract never passes.
+	noGov := c
+	noGov.GovernanceSignature = nil
+	if _, _, all := srv.verifyContractSignatures(ctx, &noGov); all {
+		t.Fatal("contract without a governance signature passed verification")
+	}
+	otherGov := newTestServer(nil) // a different governance key
+	otherGov.publicKeys = srv.publicKeys
+	if _, _, all := otherGov.verifyContractSignatures(ctx, &c); all {
+		t.Fatal("governance signature from another key was accepted")
+	}
+
 	// Tampering with the contract after signing breaks the hash.
 	tampered := c
 	tampered.Parties.DataProviders = append([]contract.DataProviderParty(nil), c.Parties.DataProviders...)
@@ -129,10 +146,71 @@ func TestVerifyContractSignatures(t *testing.T) {
 	}
 }
 
-// With the gate on, a TEE run that doesn't name a signed contract never
+// The governance signature is over the hash and doesn't change it, so
+// signing never invalidates the hash being signed.
+func TestGovernanceSignatureLeavesHashStable(t *testing.T) {
+	srv := newTestServer(nil)
+	c := twoProviderContract(t, srv)
+	h, err := contract.ComputeHash(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != c.ContractHash {
+		t.Fatalf("hash changed after governance signing: %s != %s", h, c.ContractHash)
+	}
+	if err := services.VerifyContractHashSignature(srv.govKey.PublicKeyPEM(), c.ContractHash, c.GovernanceSignature.Value); err != nil {
+		t.Fatalf("governance signature doesn't verify with the governance public key: %v", err)
+	}
+}
+
+// FL roster contracts carry the Keycloak user id as the party ID and the
+// username in Name; they're only signable once finalized (version 2), and
+// the accept-invite SignedAt marker alone doesn't count as a signature.
+func TestFLContractSigning(t *testing.T) {
+	alice, alicePub := newRSAKey(t)
+	srv := newTestServer(nil)
+	srv.publicKeys = stubKeys{"alice": alicePub}
+	ctx := context.Background()
+
+	now := time.Now()
+	c := contract.Contract{
+		ContractID: "fl-1",
+		Technique:  "FL",
+		Version:    1,
+		Parties: contract.Parties{DataProviders: []contract.DataProviderParty{
+			{ID: "5f0c-keycloak-uuid", Name: "alice", Signature: contract.Signature{SignedAt: &now}},
+		}},
+	}
+	if signable(&c) {
+		t.Fatal("draft FL contract reported signable")
+	}
+	c.Version = 2
+	if !signable(&c) {
+		t.Fatal("final roster FL contract not signable")
+	}
+	if got := partyProviderID(c.Parties.DataProviders[0]); got != "provider-alice" {
+		t.Fatalf("partyProviderID = %q, want provider-alice", got)
+	}
+
+	h, _ := contract.ComputeHash(c)
+	c.ContractHash = h
+	if err := srv.governanceSign(&c); err != nil {
+		t.Fatal(err)
+	}
+	if parties, _, all := srv.verifyContractSignatures(ctx, &c); all || parties[0].Signed {
+		t.Fatal("accept-invite marker counted as a signature")
+	}
+
+	sign(&c, 0, "alice", signWith(t, alice, c.ContractHash))
+	if parties, hashOK, all := srv.verifyContractSignatures(ctx, &c); !hashOK || !all {
+		t.Fatalf("expected FL contract fully signed, got parties=%+v", parties)
+	}
+}
+
+// With the gate on, a TEE/SMPC run that doesn't name a signed contract never
 // reaches VM provisioning.
 func TestProvisionBlockedWithoutSignedContract(t *testing.T) {
-	srv := newTestServer(&config.Config{TEEAzureRG: "TEE", TEEVMName: "vm-1", TEERequireSignedContract: true})
+	srv := newTestServer(&config.Config{TEEAzureRG: "TEE", TEEVMName: "vm-1", RequireSignedContract: true})
 
 	body, _ := json.Marshal(validContract()) // no governanceContractId
 	for _, path := range []string{"/v1/tee/provision", "/v1/tee/sessions"} {

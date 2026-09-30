@@ -208,9 +208,9 @@ func (s *Server) doProvisionTEE(ctx context.Context, contract *services.TEEContr
 		return nil, nil, &teeAPIError{Status: http.StatusBadRequest, Code: "INVALID_CONTRACT", Message: err.Error()}
 	}
 
-	// No TEE runs until every data provider has signed the generated
-	// contract (tee_contract_signing.go). Checked before any VM is started.
-	if s.cfg.TEERequireSignedContract {
+	// No TEE/SMPC run starts until every data provider has signed the generated
+	// contract (contract_signing.go). Checked before any VM is started.
+	if s.cfg.RequireSignedContract {
 		if err := s.requireSignedContract(ctx, contract); err != nil {
 			return nil, nil, err
 		}

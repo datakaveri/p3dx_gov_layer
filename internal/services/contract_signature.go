@@ -10,8 +10,8 @@ import (
 	"fmt"
 )
 
-// ContractSignatureAlgorithm is the only scheme data providers sign a TEE
-// contract hash with: RSASSA-PKCS1-v1_5 over SHA-256. It matches the RSA-2048
+// ContractSignatureAlgorithm is the only scheme contract hashes are signed
+// with, by data providers and by the governance layer (GovernanceKey) alike: RSASSA-PKCS1-v1_5 over SHA-256. It matches the RSA-2048
 // key pair p3dx-aaa provisions per data provider (keyPair.service.js) and what
 // the browser's WebCrypto produces with {name: "RSASSA-PKCS1-v1_5", hash: "SHA-256"}.
 const ContractSignatureAlgorithm = "RSASSA-PKCS1-v1_5-SHA256"

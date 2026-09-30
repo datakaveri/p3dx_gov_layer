@@ -156,6 +156,15 @@ func (s *Server) handleFLContract(w http.ResponseWriter, r *http.Request, req Co
 // handleGeneralContract processes General pathway (TEE/SMPC) contracts
 // Fetches policies from APD for each dataset, authorizes, and deploys
 func (s *Server) handleGeneralContract(w http.ResponseWriter, r *http.Request, req ContractRequest, claims jwt.MapClaims, contractBytes []byte) {
+	// Nothing deploys until every data provider has signed the generated
+	// contract this request names (contract_signing.go).
+	if s.cfg.RequireSignedContract {
+		if _, err := s.requireAllProvidersSigned(r.Context(), stringValue(req.Contract, "contract_id")); err != nil {
+			writeTEEError(w, err)
+			return
+		}
+	}
+
 	// Extract datasets from contract
 	datasets := extractDatasets(req.Contract)
 	if len(datasets) == 0 {

@@ -17,6 +17,7 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/httpapi"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/keycloak"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
 func main() {
@@ -34,7 +35,15 @@ func main() {
 	defer database.Close()
 
 	kc := keycloak.New(cfg)
-	api := httpapi.New(cfg, database, kc)
+
+	// gov_layer's own contract-signing key pair (generated on first start).
+	govKey, err := services.LoadOrCreateGovernanceKey(cfg.GovSigningKeyPath)
+	if err != nil {
+		log.Fatalf("[ERROR] Failed to load governance signing key: %v", err)
+	}
+	log.Printf("[INFO] Governance signing key: %s", cfg.GovSigningKeyPath)
+
+	api := httpapi.New(cfg, database, kc, govKey)
 
 	// REST (HTTP) server.
 	restServer := &http.Server{

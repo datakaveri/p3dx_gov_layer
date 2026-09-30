@@ -8,6 +8,8 @@ package httpapi
 // output proxy against a stub enclave manager.
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -34,7 +36,15 @@ func newTestServer(cfg *config.Config) *Server {
 	if cfg.TEEOutputTimeout == 0 {
 		cfg.TEEOutputTimeout = 5 * time.Second
 	}
-	return New(cfg, nil, nil)
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	govKey, err := services.NewGovernanceKey(priv)
+	if err != nil {
+		panic(err)
+	}
+	return New(cfg, nil, nil, govKey)
 }
 
 func validContract() services.TEEContract {
