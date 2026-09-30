@@ -271,6 +271,38 @@ func (d *DB) SignDataProviderParty(ctx context.Context, sessionID, username stri
 	return true, nil
 }
 
+// GetContractByContractID returns the stored contract whose JSON contract_id
+// matches, or (nil, nil) when none exists. Signing addresses contracts by
+// contract_id for every technique — for a generated TEE/SMPC contract that's
+// also its project_id, but an FL roster contract mints the two separately.
+func (d *DB) GetContractByContractID(ctx context.Context, contractID string) (json.RawMessage, error) {
+	var raw json.RawMessage
+	err := d.Pool.QueryRow(ctx,
+		`SELECT contract FROM contracts WHERE contract->>'contract_id' = $1 ORDER BY updated_at DESC LIMIT 1`,
+		contractID,
+	).Scan(&raw)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// UpdateContractByContractID overwrites the stored contract JSON for the row
+// whose contract_id matches. Returns false when no such row exists.
+func (d *DB) UpdateContractByContractID(ctx context.Context, contractID string, raw json.RawMessage) (bool, error) {
+	tag, err := d.Pool.Exec(ctx,
+		`UPDATE contracts SET contract = $1, updated_at = CURRENT_TIMESTAMP WHERE contract->>'contract_id' = $2`,
+		raw, contractID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // UpdateContractByProjectID overwrites the stored contract JSON for one
 // project_id (for a generated TEE contract, project_id is its contract_id —
 // see StoreGeneratedContract). Returns false when no such row exists.

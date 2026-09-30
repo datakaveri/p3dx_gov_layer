@@ -52,6 +52,18 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The final roster contract is what data providers sign: gov_layer signs
+	// its hash first, so the stored copy carries the governance signature.
+	if body.Finalize {
+		if err := s.governanceSign(contract); err != nil {
+			log.Println("[GOVERNANCE] Error governance-signing contract:", err)
+			writeJSON(w, http.StatusInternalServerError, j{
+				"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error(),
+			})
+			return
+		}
+	}
+
 	//contract gets stored in db
 	contractID, err := s.db.StoreContract(reqCtx(r), contract, body.Finalize, "FL")
 	if err != nil {
@@ -72,10 +84,23 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		log.Println("[GOVERNANCE] Error recording project participants:", err)
 	}
 
+	// Final roster: ask every data provider on it to sign (contract_signing.go).
+	// The FL session can't start until they all have (p3dx-aaa checks
+	// GET /contracts/by-session/{sessionId}/signatures).
+	signRequestsSent := 0
+	if body.Finalize {
+		sender := contract.Parties.User.Name
+		if sender == "" {
+			sender = contract.Parties.User.ID
+		}
+		signRequestsSent = s.notifyContractSigners(reqCtx(r), *contract, sender)
+	}
+
 	//like a contract payload is sent to the client with the status code 201
 	log.Printf("[GOVERNANCE] ✅ Contract %s ready (session=%s finalized=%t)", contractID, contract.SessionInfo.SessionID, body.Finalize)
 	writeJSON(w, http.StatusCreated, j{
 		"status": "SUCCESS", "contract_id": contractID, "finalized": body.Finalize, "contract": contract,
+		"sign_requests_sent": signRequestsSent,
 	})
 }
 

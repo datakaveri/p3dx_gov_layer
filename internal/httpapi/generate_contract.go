@@ -108,9 +108,10 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 			if req.ProviderID != "" {
 				in.ProviderID = req.ProviderID
 				in.ProviderName = lookupProvider(req.ProviderID).Name
-			} else if req.Technique == "TEE" {
-				// TEE: the dataset's own APD policy names its provider — that
-				// provider_id is who gets sent the contract to sign below.
+			} else if req.Technique != "FL" {
+				// TEE/SMPC: the dataset's own APD policy names its provider —
+				// that provider_id is who gets sent the contract to sign below.
+				// (FL is signed later, on its final roster contract.)
 				in.ProviderID, _ = policy["provider_id"].(string)
 				in.ProviderName, _ = policy["provider_email"].(string)
 				if in.ProviderName == "" {
@@ -200,6 +201,16 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		Infras: infraInputs,
 	})
 
+	// TEE/SMPC: gov_layer signs the hash with its own key before storing, so
+	// the stored copy carries the governance signature providers verify.
+	// Best-effort here — without it the sign requests just aren't sent, and
+	// the run gate stays closed.
+	if req.Technique != "FL" && contract.ContractHash != "" {
+		if err := s.governanceSign(&contract); err != nil {
+			log.Printf("[GENERATE] Warning: failed to governance-sign contract %s: %v", contract.ContractID, err)
+		}
+	}
+
 	// Dedup/session key for StoreGeneratedContract: joins every selected
 	// dataset ID (sorted, so selection order doesn't matter) so regenerating
 	// the same N-dataset selection overwrites the same draft row instead of
@@ -221,16 +232,18 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 
 	log.Printf("[GENERATE] Contract generated (unsigned): datasets=%s technique=%s hash=%s", datasetKey, req.Technique, contract.ContractHash)
 
-	// TEE: send the hash + contract to each participating data provider to
-	// sign (tee_contract_signing.go). Only once stored — signing verifies
-	// against the stored copy, so an unstored contract could never be signed.
+	// TEE/SMPC: send the hash + governance signature + contract to each
+	// participating data provider to sign (contract_signing.go). Only once
+	// stored — signing verifies against the stored copy, so an unstored
+	// contract could never be signed. FL sends its sign requests from
+	// postContract once the final roster contract exists instead.
 	signRequestsSent := 0
-	if req.Technique == "TEE" && stored && contract.ContractHash != "" {
+	if req.Technique != "FL" && stored && contract.GovernanceSignature != nil {
 		sender, _ := claims["preferred_username"].(string)
 		if sender == "" {
 			sender = consumerID
 		}
-		signRequestsSent = s.notifyTEEContractSigners(r.Context(), contract, sender)
+		signRequestsSent = s.notifyContractSigners(r.Context(), contract, sender)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

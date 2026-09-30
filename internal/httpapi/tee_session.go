@@ -124,7 +124,7 @@ func (s *Server) startTEESession(w http.ResponseWriter, r *http.Request) {
 
 	// Refuse up front (not just inside doProvisionTEE, which also checks) so
 	// an unsigned contract gets a 403 instead of a session that later fails.
-	if s.cfg.TEERequireSignedContract {
+	if s.cfg.RequireSignedContract {
 		if err := s.requireSignedContract(r.Context(), &contract); err != nil {
 			writeTEEError(w, err)
 			return

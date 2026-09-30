@@ -25,11 +25,13 @@ import (
 // notification (db.SignDataProviderParty, called from
 // httpapi.respondToNotification).
 //
-// For the TEE pathway, each data-provider party instead signs the contract's
-// ContractHash with their own RSA private key (httpapi.handleSignTEEContract),
-// and the verified signature bytes are recorded in Value alongside the hash
-// that was signed. The whole block is blanked by ComputeHash, so recording a
-// signature never changes the hash being signed.
+// For every technique (FL final roster, TEE, SMPC), each data-provider party
+// additionally signs the contract's ContractHash with their own RSA private
+// key (httpapi.handleSignContract), and the verified signature bytes are
+// recorded in Value alongside the hash that was signed. Only a verified Value
+// counts toward the run gate — SignedAt alone (FL's accept-invite marker) does
+// not. The whole block is blanked by ComputeHash, so recording a signature
+// never changes the hash being signed.
 type Signature struct {
 	SignedAt   *time.Time `json:"signed_at"`
 	Signer     string     `json:"signer,omitempty"`      // Keycloak username whose public key verifies Value
@@ -154,6 +156,11 @@ type Contract struct {
 	Parties       Parties     `json:"parties"`
 	SessionInfo   SessionInfo `json:"session_info"`
 	ContractHash  string      `json:"contract_hash,omitempty"`
+	// GovernanceSignature is gov_layer's own signature over ContractHash
+	// (services.GovernanceKey), sent to data providers so they can verify the
+	// hash came from gov_layer before signing it. Blanked by ComputeHash like
+	// the party signatures.
+	GovernanceSignature *Signature `json:"governance_signature,omitempty"`
 }
 
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with
@@ -163,6 +170,7 @@ type Contract struct {
 // owner self-sign, then each provider's SignDataProviderParty on accept).
 func ComputeHash(c Contract) (string, error) {
 	c.ContractHash = ""
+	c.GovernanceSignature = nil
 	c = withoutSignatures(c)
 	b, err := json.Marshal(c)
 	if err != nil {

@@ -101,11 +101,16 @@ type Config struct {
 	TEEAttestTimeout       time.Duration // TEE_ATTEST_TIMEOUT_MS (default 180000) — attestation is slow
 	TEEClockLeeway         time.Duration // TEE_CLOCK_LEEWAY_MS (default 60000)
 
-	// TEERequireSignedContract defaults to TRUE: a TEE is never provisioned
-	// unless the run names a generated TEE contract (governanceContractId)
-	// that every data provider has signed, each signature verified against
-	// that provider's Keycloak public key (tee_contract_signing.go).
-	TEERequireSignedContract bool // TEE_REQUIRE_SIGNED_CONTRACT (default true)
+	// RequireSignedContract defaults to TRUE: no FL session, TEE or SMPC run
+	// starts unless every data provider has signed its contract's hash, each
+	// signature verified against that provider's Keycloak public key
+	// (contract_signing.go). The older TEE_REQUIRE_SIGNED_CONTRACT name is
+	// still read when REQUIRE_SIGNED_CONTRACT is unset.
+	RequireSignedContract bool // REQUIRE_SIGNED_CONTRACT (default true)
+
+	// GovSigningKeyPath is where gov_layer's own contract-signing RSA key pair
+	// lives (PKCS#8 PEM). Generated on first start if missing.
+	GovSigningKeyPath string // GOV_SIGNING_KEY_PATH (default keys/governance_signing_key.pem)
 
 	// --- user directory (the platform's own Keycloak, where p3dx-aaa keeps
 	// users and each data provider's "public_key" attribute). Distinct from
@@ -209,7 +214,8 @@ func Load() *Config {
 		TEEAttestTimeout:       getEnvMS("TEE_ATTEST_TIMEOUT_MS", 180000),
 		TEEClockLeeway:         getEnvMS("TEE_CLOCK_LEEWAY_MS", 60000),
 
-		TEERequireSignedContract: getEnvBool("TEE_REQUIRE_SIGNED_CONTRACT", true),
+		RequireSignedContract: getEnvBool("REQUIRE_SIGNED_CONTRACT", getEnvBool("TEE_REQUIRE_SIGNED_CONTRACT", true)),
+		GovSigningKeyPath:     getEnv("GOV_SIGNING_KEY_PATH", "keys/governance_signing_key.pem"),
 
 		UserKeycloakBaseURL:       getEnv("USER_KEYCLOAK_BASE_URL", "http://localhost:8080"),
 		UserKeycloakRealm:         getEnv("USER_KEYCLOAK_REALM", "master"),
