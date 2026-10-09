@@ -190,6 +190,59 @@ func (d *DB) migrate(ctx context.Context) error {
 		// scope that uniqueness to just those rows so it doesn't reintroduce the
 		// one-row-per-real-session limit dropped above.
 		`CREATE UNIQUE INDEX IF NOT EXISTS contracts_preview_session_id_key ON contracts(session_id) WHERE session_id LIKE 'preview:%'`,
+		// Every contract has its own job_id (minted in BuildContract /
+		// BuildGeneratedContract before hashing, and in contract.JobID). Rows
+		// from before this column existed are backfilled with a fresh id in the
+		// column only - their stored JSON is left alone, since contract_signing
+		// recomputes the hash from it and adding job_id would break existing
+		// signatures.
+		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS job_id TEXT`,
+		`UPDATE contracts
+			SET job_id = 'job-' || (FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000))::bigint || '-' || substr(md5(random()::text || id), 1, 9)
+			WHERE job_id IS NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS contracts_job_id_key ON contracts(job_id)`,
+		// Audit trail for job approvals (audit.go): one row per check of one
+		// provider + item (dataset or infra) on a contract's job_id - whether
+		// the provider holds the data-provider / infra-provider role and has
+		// that item in their APD catalogue. Append-only; the latest row per
+		// (job_id, type, provider_id, item) is the current status.
+		`CREATE TABLE IF NOT EXISTS audit (
+			id BIGSERIAL PRIMARY KEY,
+			job_id TEXT NOT NULL,
+			type TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			item TEXT NOT NULL,
+			status TEXT NOT NULL,
+			has_role BOOLEAN NOT NULL DEFAULT false,
+			in_catalogue BOOLEAN NOT NULL DEFAULT false,
+			reason TEXT,
+			checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS audit_job_key_idx ON audit(job_id, type, provider_id, item, checked_at)`,
+		// When a contract's sign requests went out. Contracts that need job
+		// approval hold them until every approval is accepted, then send them
+		// exactly once (MarkSignRequestsSent claims this atomically).
+		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS sign_requests_sent_at TIMESTAMP`,
+		// Job lifecycle after approval (audit.go): when a job's contract became
+		// final (every data and infra provider approved and signed, plus the
+		// governance signature) and when its consumer enabled the TEE run.
+		// Kept in columns, not the contract JSON, so the signed hash is
+		// unaffected.
+		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP`,
+		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS tee_enabled_at TIMESTAMP`,
+		// One RSA public key per provider user (data-provider / infra-provider),
+		// generated in their browser and registered via PUT /provider-keys; the
+		// contract-signing flow verifies their signatures against it. See
+		// internal/db/public_keys.go.
+		`CREATE TABLE IF NOT EXISTS provider_public_keys (
+			username TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			public_key_pem TEXT NOT NULL,
+			fingerprint_sha256 TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -201,6 +254,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table session_reports ready")
 	log.Println("[DATABASE] Table contracts ready")
 	log.Println("[DATABASE] Table vm_registry ready")
+	log.Println("[DATABASE] Table provider_public_keys ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }

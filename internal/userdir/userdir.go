@@ -1,14 +1,12 @@
 // Package userdir reads user records from the platform's own Keycloak — the
-// realm p3dx-aaa registers users into — via the admin REST API. Today it only
-// serves one thing: a data provider's registered RSA public key, stored by
-// p3dx-aaa's keyPair.service.js as the "public_key" user attribute, which
-// gov_layer uses to verify TEE contract signatures.
+// realm p3dx-aaa registers users into — via the admin REST API, to list which
+// users hold a realm role (job-approval checks). Providers' public keys are
+// not read from here; they live in Postgres (internal/db/public_keys.go).
 package userdir
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,20 +18,13 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 )
 
-// PublicKeyAttribute is the Keycloak user attribute p3dx-aaa publishes a
-// data provider's public key under (see keyPair.service.js).
-const PublicKeyAttribute = "public_key"
-
-// ErrUserNotFound / ErrNoPublicKey let callers report a precise reason.
-var (
-	ErrUserNotFound = errors.New("user not found in Keycloak")
-	ErrNoPublicKey  = errors.New("user has no public_key attribute in Keycloak")
-)
-
-// Client talks to the Keycloak admin API with an admin-cli password-grant
-// token, cached until shortly before it expires.
+// Client talks to the Keycloak admin API with a token cached until shortly
+// before it expires: a client_credentials token for clientID/clientSecret
+// when those are set, otherwise an admin-cli password-grant token for
+// user/password.
 type Client struct {
 	baseURL, realm, user, password string
+	clientID, clientSecret         string
 	http                           *http.Client
 
 	mu        sync.Mutex
@@ -43,16 +34,23 @@ type Client struct {
 
 func New(cfg *config.Config) *Client {
 	return &Client{
-		baseURL:  strings.TrimRight(cfg.UserKeycloakBaseURL, "/"),
-		realm:    cfg.UserKeycloakRealm,
-		user:     cfg.UserKeycloakAdminUser,
-		password: cfg.UserKeycloakAdminPassword,
-		http:     &http.Client{Timeout: 10 * time.Second},
+		baseURL:      strings.TrimRight(cfg.UserKeycloakBaseURL, "/"),
+		realm:        cfg.UserKeycloakRealm,
+		user:         cfg.UserKeycloakAdminUser,
+		password:     cfg.UserKeycloakAdminPassword,
+		clientID:     cfg.UserKeycloakClientID,
+		clientSecret: cfg.UserKeycloakClientSecret,
+		http:         &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
+func (c *Client) usesClientCredentials() bool {
+	return c.clientID != "" && c.clientSecret != ""
+}
+
 func (c *Client) Configured() bool {
-	return c != nil && c.baseURL != "" && c.realm != "" && c.user != "" && c.password != ""
+	return c != nil && c.baseURL != "" && c.realm != "" &&
+		(c.usesClientCredentials() || (c.user != "" && c.password != ""))
 }
 
 func (c *Client) adminToken(ctx context.Context) (string, error) {
@@ -66,6 +64,13 @@ func (c *Client) adminToken(ctx context.Context) (string, error) {
 		"client_id":  {"admin-cli"},
 		"username":   {c.user},
 		"password":   {c.password},
+	}
+	if c.usesClientCredentials() {
+		form = url.Values{
+			"grant_type":    {"client_credentials"},
+			"client_id":     {c.clientID},
+			"client_secret": {c.clientSecret},
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.baseURL+"/realms/"+url.PathEscape(c.realm)+"/protocol/openid-connect/token",
@@ -95,46 +100,52 @@ func (c *Client) adminToken(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
-// PublicKey returns the PEM public key registered on the Keycloak user with
-// exactly this username.
-func (c *Client) PublicKey(ctx context.Context, username string) (string, error) {
+// UsernamesWithRole returns the usernames of every user holding the realm
+// role roleName (e.g. "data-provider", granted when an admin accepts that
+// user's role request). A role that doesn't exist yields an empty list.
+func (c *Client) UsernamesWithRole(ctx context.Context, roleName string) ([]string, error) {
 	if !c.Configured() {
-		return "", fmt.Errorf("user Keycloak is not configured (USER_KEYCLOAK_*)")
+		return nil, fmt.Errorf("user Keycloak is not configured (USER_KEYCLOAK_BASE_URL/REALM plus CLIENT_ID/SECRET or ADMIN_USER/PASSWORD)")
 	}
 	token, err := c.adminToken(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	q := url.Values{"username": {username}, "exact": {"true"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/admin/realms/"+url.PathEscape(c.realm)+"/users?"+q.Encode(), nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("keycloak user lookup: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("keycloak user lookup returned %d", resp.StatusCode)
-	}
-	var users []struct {
-		Username   string              `json:"username"`
-		Attributes map[string][]string `json:"attributes"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
-		return "", fmt.Errorf("decode keycloak users: %w", err)
-	}
-	for _, u := range users {
-		if !strings.EqualFold(u.Username, username) {
-			continue
+	const pageSize = 500
+	var out []string
+	for first := 0; ; first += pageSize {
+		q := url.Values{"first": {fmt.Sprint(first)}, "max": {fmt.Sprint(pageSize)}}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			c.baseURL+"/admin/realms/"+url.PathEscape(c.realm)+"/roles/"+url.PathEscape(roleName)+"/users?"+q.Encode(), nil)
+		if err != nil {
+			return nil, err
 		}
-		if vals := u.Attributes[PublicKeyAttribute]; len(vals) > 0 && vals[0] != "" {
-			return vals[0], nil
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("keycloak role users lookup: %w", err)
 		}
-		return "", ErrNoPublicKey
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			return out, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("keycloak role users lookup returned %d", resp.StatusCode)
+		}
+		var users []struct {
+			Username string `json:"username"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&users)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("decode keycloak role users: %w", err)
+		}
+		for _, u := range users {
+			out = append(out, u.Username)
+		}
+		if len(users) < pageSize {
+			return out, nil
+		}
 	}
-	return "", ErrUserNotFound
 }

@@ -1,0 +1,1082 @@
+{
+  "info": {
+    "name": "DX DataBank onboarding + job approval flow",
+    "description": "End-to-end flow: data provider onboards a DataBank in the DX catalogue, consumer creates a job (draft contract) on it, data + infra providers approve it - each approval also posts their APD policy and their signature of the contract hash (keys generated on their own machine) - and the governance layer verifies.\n\nSetup: fill the *_username / *_password variables (or paste full tokens from the dev portal into data_provider_token / infra_provider_token / access_token). Change dataset_name on every run of A1b (catalogue names are unique); A1b saves the new item id into dataset_id.\n\nServices: cp_url = DX Control Plane (dev), gov_url = p3dx_gov_layer (8083), apd_url = p3dx-apd (8082).\n\nNot implemented yet (planned): provider GET inbox of pending jobs, reject, GET job status.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "A. Provider setup (one-time, before any job)",
+      "description": "Done once by the providers, not per job: onboard what they offer, and register the public key of a key pair generated on their own machine (the private key never leaves it).",
+      "item": [
+        {
+          "name": "A1. Data provider: onboard the DataBank + register the public key",
+          "item": [
+            {
+              "name": "A1a. Login as data provider",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
+                "description": "Data provider's own dev Keycloak token, saved as data_provider_token (used in 1b, 4b, 6, 7a, 7b). Must carry sub/preferred_username and the provider role - if the test fails, paste a token from the dev portal into data_provider_token instead.",
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    {
+                      "key": "grant_type",
+                      "value": "password",
+                      "type": "text"
+                    },
+                    {
+                      "key": "client_id",
+                      "value": "{{client_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "username",
+                      "value": "{{data_provider_username}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "password",
+                      "value": "{{data_provider_password}}",
+                      "type": "text"
+                    }
+                  ]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('login ok', () => pm.response.to.have.status(200));",
+                      "const d = pm.response.json();",
+                      "if (d.access_token) {",
+                      "  const claims = JSON.parse(atob(d.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                      "  if (claims.sub && (claims.preferred_username || claims.email)) {",
+                      "    pm.collectionVariables.set('data_provider_token', d.access_token);",
+                      "    // provider_id as gov_layer derives it (provider-<slug(username)>)",
+                      "    const pid = 'provider-' + (claims.preferred_username || claims.email).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');",
+                      "    pm.collectionVariables.set('data_provider_id', pid);",
+                      "    console.log('data_provider_id =', pid);",
+                      "  } else {",
+                      "    console.log('This login returned a token without sub/preferred_username (admin-cli lightweight token) - NOT saved; data_provider_token keeps its current value. Paste a full token from the dev portal into data_provider_token.');",
+                      "  }",
+                      "  const roles = (claims.realm_access || {}).roles || [];",
+                      "  console.log('logged in:', claims.preferred_username || claims.email, '| roles:', roles.join(', '));",
+                      "  pm.test('token names the user (sub + preferred_username or email)', () => pm.expect(claims.sub && (claims.preferred_username || claims.email)).to.be.ok);",
+                      "  pm.test('has the provider role', () => pm.expect(roles).to.include(pm.variables.get('data_provider_role')));",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "A1b. Onboard DataBank (create cat item)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                      "const res = pm.response.json();",
+                      "if (res.result && res.result.id) {",
+                      "  pm.collectionVariables.set('dataset_id', res.result.id);",
+                      "  console.log('dataset_id =', res.result.id);",
+                      "}"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n    \"name\": \"{{dataset_name}}\",\n    \"type\": [\n        \"adex:DataBank\"\n    ],\n    \"apdURL\": \"v2.dev.iudx.io/controlplane/acl\",\n    \"shortDescription\": \"Daily aggregated temperature and rainfall data at subdistrict level.\",\n    \"description\": \"Daily weather statistics at subdistrict level including temperature and rainfall metrics.\",\n    \"tags\": [\n        \"weather\",\n        \"temperature\",\n        \"rainfall\",\n        \"environment\"\n    ],\n    \"uploadedBy\": \"Forecast department\",\n    \"accessPolicy\": \"RESTRICTED\",\n    \"organizationType\": \"Public\",\n    \"fileFormat\": \"xlsx\",\n    \"department\": \"Department of IT, Electronics and Communication\",\n    \"industry\": \"Environmental Monitoring\",\n    \"geoCoverage\": \"Karnataka, India\",\n    \"yearRange\": \"2021-2024\",\n    \"uploadFrequency\": \"Daily\",\n    \"verifiedBy\": \"Department of Meteorology, Karnataka\",\n    \"license\": \"CC-BY 4.0\",\n    \"resourceServer\": [\n        {\n            \"queryTypes\": [\n                \"ATTR\"\n            ],\n            \"name\": \"NGSI-LD\",\n            \"accessTypes\": [\n                \"api\"\n            ],\n            \"type\": \"ngsi-ld\",\n            \"datasetType\": \"DATASET\",\n            \"url\": \"v2.dev.iudx.io/dataplane\"\n        },\n        {\n            \"queryTypes\": [\n                \"ATTR\"\n            ],\n            \"name\": \"FILE\",\n            \"accessTypes\": [\n                \"api\"\n            ],\n            \"type\": \"file\",\n            \"datasetType\": \"FILE\",\n            \"url\": \"v2.dev.iudx.io/files-connect-api\"\n        }\n    ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{cp_url}}/iudx/v2/cat/item/",
+                  "host": [
+                    "{{cp_url}}"
+                  ],
+                  "path": [
+                    "iudx",
+                    "v2",
+                    "cat",
+                    "item",
+                    ""
+                  ]
+                },
+                "description": "POST /iudx/v2/cat/item - creates the DataBank catalogue item. On 201, `result.id` is saved to `dataset_id`.\n\nExpect: itemStatus VERIFIED (if org_admin), publishStatus PENDING, dataUploadStatus false.",
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{data_provider_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "A1c. Register the data provider's public key (once)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('public key registered', () => pm.response.to.have.status(200));",
+                      "console.log(pm.response.text());"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{data_provider_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"public_key_pem\": \"{{data_provider_public_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{gov_url}}/provider-keys/{{data_provider_role}}",
+                  "host": [
+                    "{{gov_url}}"
+                  ],
+                  "path": [
+                    "provider-keys",
+                    "{{data_provider_role}}"
+                  ]
+                },
+                "description": "Once per data provider. Generate the key pair on the data provider's own machine: `scripts/contract-sign.sh keygen keys/providers/<name>` - the private key stays there; paste the printed public key into data_provider_public_key. gov_layer uses it to cross-check the signature sent with each approval."
+              }
+            }
+          ]
+        },
+        {
+          "name": "A2. Infra provider: onboard the infras + register the public key",
+          "item": [
+            {
+              "name": "A2a. Login as infra provider",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
+                "description": "Infra provider's dev Keycloak token, saved as infra_provider_token (used to submit the infras).",
+                "body": {
+                  "mode": "urlencoded",
+                  "urlencoded": [
+                    {
+                      "key": "grant_type",
+                      "value": "password",
+                      "type": "text"
+                    },
+                    {
+                      "key": "client_id",
+                      "value": "{{client_id}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "username",
+                      "value": "{{infra_provider_username}}",
+                      "type": "text"
+                    },
+                    {
+                      "key": "password",
+                      "value": "{{infra_provider_password}}",
+                      "type": "text"
+                    }
+                  ]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('login ok', () => pm.response.to.have.status(200));",
+                      "const d = pm.response.json();",
+                      "if (d.access_token) {",
+                      "  const claims = JSON.parse(atob(d.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                      "  if (claims.sub && (claims.preferred_username || claims.email)) {",
+                      "    pm.collectionVariables.set('infra_provider_token', d.access_token);",
+                      "    // provider_id as gov_layer derives it (provider-<slug(username)>), so the infras below are owned by this login",
+                      "    const pid = 'provider-' + (claims.preferred_username || claims.email).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');",
+                      "    pm.collectionVariables.set('infra_provider_id', pid);",
+                      "    console.log('infra_provider_id =', pid);",
+                      "  } else {",
+                      "    console.log('This login returned a token without sub/preferred_username (admin-cli lightweight token) - NOT saved; infra_provider_token keeps its current value. Paste a full token from the dev portal into infra_provider_token.');",
+                      "  }",
+                      "  const roles = (claims.realm_access || {}).roles || [];",
+                      "  console.log('logged in:', claims.preferred_username || claims.email, '| roles:', roles.join(', '));",
+                      "  pm.test('token names the user (sub + preferred_username or email)', () => pm.expect(claims.sub && (claims.preferred_username || claims.email)).to.be.ok);",
+                      "}"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "A2b. Onboard infra 1 (APD infra catalogue)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{apd_url}}/policy",
+                "description": "Registers infra_id_1 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_1 to register a new infra; consumers pick it in 1b and 2c checks it.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"policyId\": \"pol-{{infra_id_1}}\",\n  \"itemId\": \"{{infra_id_1}}\",\n  \"issuedBy\": \"{{infra_provider_id}}\",\n  \"provider_id\": \"{{infra_provider_id}}\",\n  \"rules\": {\n    \"policy_type\": \"infra-provider\",\n    \"infrastructure\": {\n      \"name\": \"Dev test infra 1\",\n      \"region\": \"centralindia\",\n      \"platform\": {\n        \"provider\": \"azure\"\n      },\n      \"attestation\": {\n        \"required\": false,\n        \"service\": \"\",\n        \"policy_id\": \"\"\n      },\n      \"capacity\": {\n        \"cpu_cores\": 4,\n        \"ram_mb\": 8192,\n        \"sgx_enabled\": false,\n        \"tdx_enabled\": false,\n        \"sev_snp_enabled\": false,\n        \"sev_enabled\": false,\n        \"nitro_enclave_enabled\": false\n      }\n    }\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{infra_provider_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('infra 1 onboarded', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+                      "console.log('infra_id_1 =', pm.variables.get('infra_id_1'), '| owner', pm.variables.get('infra_provider_id'), '|', pm.response.code, pm.response.text().slice(0, 200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "A2c. Onboard infra 2 (APD infra catalogue)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{apd_url}}/policy",
+                "description": "Registers infra_id_2 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_2 to register a new infra; consumers pick it in 1b and 2c checks it.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"policyId\": \"pol-{{infra_id_2}}\",\n  \"itemId\": \"{{infra_id_2}}\",\n  \"issuedBy\": \"{{infra_provider_id}}\",\n  \"provider_id\": \"{{infra_provider_id}}\",\n  \"rules\": {\n    \"policy_type\": \"infra-provider\",\n    \"infrastructure\": {\n      \"name\": \"Dev test infra 2\",\n      \"region\": \"centralindia\",\n      \"platform\": {\n        \"provider\": \"azure\"\n      },\n      \"attestation\": {\n        \"required\": false,\n        \"service\": \"\",\n        \"policy_id\": \"\"\n      },\n      \"capacity\": {\n        \"cpu_cores\": 4,\n        \"ram_mb\": 8192,\n        \"sgx_enabled\": false,\n        \"tdx_enabled\": false,\n        \"sev_snp_enabled\": false,\n        \"sev_enabled\": false,\n        \"nitro_enclave_enabled\": false\n      }\n    }\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{infra_provider_token}}",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('infra 2 onboarded', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+                      "console.log('infra_id_2 =', pm.variables.get('infra_id_2'), '| owner', pm.variables.get('infra_provider_id'), '|', pm.response.code, pm.response.text().slice(0, 200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "A2d. Register the infra provider's public key (once)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('public key registered', () => pm.response.to.have.status(200));",
+                      "console.log(pm.response.text());"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [
+                    {
+                      "key": "token",
+                      "value": "{{infra_provider_token}}",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"public_key_pem\": \"{{infra_provider_public_key}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "url": {
+                  "raw": "{{gov_url}}/provider-keys/infra-provider",
+                  "host": [
+                    "{{gov_url}}"
+                  ],
+                  "path": [
+                    "provider-keys",
+                    "infra-provider"
+                  ]
+                },
+                "description": "Once per infra provider. Generate the key pair on the infra provider's own machine: `scripts/contract-sign.sh keygen keys/providers/<name>` - the private key stays there; paste the printed public key into infra_provider_public_key. gov_layer uses it to cross-check the signature sent with each approval."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1. Consumer creates the job (draft contract)",
+      "item": [
+        {
+          "name": "1a. Login as consumer (compute user)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
+            "description": "The user who requests the job. Saves access_token; used for 3b (generate contract) and 5 (job status).",
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "value": "password",
+                  "type": "text"
+                },
+                {
+                  "key": "client_id",
+                  "value": "{{client_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "username",
+                  "value": "{{username}}",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "{{password}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('login ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "if (d.access_token) pm.collectionVariables.set('access_token', d.access_token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1b. Create the job - POST /generate-contract",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gov_url}}/generate-contract",
+            "description": "Creates the contract with the dataset + infras and its job_id (saved as job_id / contract_id). It is NOT hashed or signed yet: once the job is approved (step 5), gov_layer hashes it, signs the hash with its own private key and sends it to the data provider (step 6 picks up contract_hash).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"datasets\": [\n    {\n      \"dataset_id\": \"{{dataset_id}}\",\n      \"dataset_name\": \"{{dataset_name}}\"\n    }\n  ],\n  \"technique\": \"SMPC\",\n  \"infra_ids\": [\n    \"{{infra_id_1}}\",\n    \"{{infra_id_2}}\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('generated', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.collectionVariables.set('job_id', d.contract.job_id);",
+                  "pm.collectionVariables.set('contract_id', d.contract.contract_id);",
+                  "console.log('job_id', d.contract.job_id, '| approval_required', d.approval_required, '| signing', d.signing);",
+                  "pm.test('contract has a job_id', () => pm.expect(d.contract.job_id).to.match(/^job-/));",
+                  "pm.test('needs approval', () => pm.expect(d.approval_required).to.eql(true));",
+                  "pm.test('signing on hold until approved', () => pm.expect(d.signing).to.eql('on_hold_pending_approval'));",
+                  "pm.test('providers notified', () => pm.expect(d.providers_notified).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "1c. Data provider gets the request (JOB_REQUEST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const jobId = pm.variables.get('job_id');",
+                  "const n = (pm.response.json().notifications || []).find(n => n.payload && n.payload.type === 'JOB_REQUEST' && n.payload.job_id === jobId);",
+                  "pm.test('data provider was asked to approve this job', () => pm.expect(n).to.be.ok);",
+                  "if (n) {",
+                  "  console.log(n.message);",
+                  "  console.log('items:', n.payload.items.map(i => i.name || i.id).join(', '), '| approve with:', n.payload.approve_with);",
+                  "  pm.test('role is data-provider', () => pm.expect(n.payload.role).to.eql('data-provider'));",
+                  "  console.log('contract', n.payload.contract_id, '| hash', n.payload.contract_hash);",
+                  "  pm.test('request carries the contract hash', () => pm.expect(n.payload.contract_hash).to.match(/^sha256:[0-9a-f]{64}$/));",
+                  "  pm.test('request carries the contract', () => pm.expect(n.payload.contract.contract_id).to.eql(pm.variables.get('contract_id')));",
+                  "  pm.collectionVariables.set('contract_hash', n.payload.contract_hash);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gov_url}}/notifications/{{data_provider_id}}",
+              "host": [
+                "{{gov_url}}"
+              ],
+              "path": [
+                "notifications",
+                "{{data_provider_id}}"
+              ]
+            },
+            "description": "The JOB_REQUEST notification gov_layer sent the data provider when the job was created (1b): which of their items the user wants, for which job/contract, and the call to approve it with. It also carries the contract and its contract_hash - the same hash gov_layer signs and sends for signing (4a) once the job is approved."
+          }
+        },
+        {
+          "name": "1d. Infra provider gets the request (JOB_REQUEST)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const jobId = pm.variables.get('job_id');",
+                  "const n = (pm.response.json().notifications || []).find(n => n.payload && n.payload.type === 'JOB_REQUEST' && n.payload.job_id === jobId);",
+                  "pm.test('infra provider was asked to approve this job', () => pm.expect(n).to.be.ok);",
+                  "if (n) {",
+                  "  console.log(n.message);",
+                  "  console.log('items:', n.payload.items.map(i => i.name || i.id).join(', '), '| approve with:', n.payload.approve_with);",
+                  "  pm.test('role is infra-provider', () => pm.expect(n.payload.role).to.eql('infra-provider'));",
+                  "  console.log('contract', n.payload.contract_id, '| hash', n.payload.contract_hash);",
+                  "  pm.test('request carries the contract hash', () => pm.expect(n.payload.contract_hash).to.match(/^sha256:[0-9a-f]{64}$/));",
+                  "  pm.test('request carries the contract', () => pm.expect(n.payload.contract.contract_id).to.eql(pm.variables.get('contract_id')));",
+                  "  pm.collectionVariables.set('contract_hash', n.payload.contract_hash);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gov_url}}/notifications/{{infra_provider_id}}",
+              "host": [
+                "{{gov_url}}"
+              ],
+              "path": [
+                "notifications",
+                "{{infra_provider_id}}"
+              ]
+            },
+            "description": "The JOB_REQUEST notification gov_layer sent the infra provider when the job was created (1b): which of their items the user wants, for which job/contract, and the call to approve it with. It also carries the contract and its contract_hash - the same hash gov_layer signs and sends for signing (4a) once the job is approved."
+          }
+        }
+      ],
+      "description": "Creating the job (1b) notifies every data provider and infra provider on it with a JOB_REQUEST: the user is asking to use their dataset / infra. 1c and 1d read those notifications."
+    },
+    {
+      "name": "2. Providers approve the job",
+      "item": [
+        {
+          "name": "2a. Login as data provider (fresh token)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
+            "description": "Fresh data-provider token (they expire in minutes) for 4b, 6, 7a and 7b.",
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "value": "password",
+                  "type": "text"
+                },
+                {
+                  "key": "client_id",
+                  "value": "{{client_id}}",
+                  "type": "text"
+                },
+                {
+                  "key": "username",
+                  "value": "{{data_provider_username}}",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "{{data_provider_password}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('login ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "if (d.access_token) {",
+                  "  const claims = JSON.parse(atob(d.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "  if (claims.sub && (claims.preferred_username || claims.email)) {",
+                  "    pm.collectionVariables.set('data_provider_token', d.access_token);",
+                  "    // provider_id as gov_layer derives it (provider-<slug(username)>)",
+                  "    const pid = 'provider-' + (claims.preferred_username || claims.email).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');",
+                  "    pm.collectionVariables.set('data_provider_id', pid);",
+                  "    console.log('data_provider_id =', pid);",
+                  "  } else {",
+                  "    console.log('This login returned a token without sub/preferred_username (admin-cli lightweight token) - NOT saved; data_provider_token keeps its current value. Paste a full token from the dev portal into data_provider_token.');",
+                  "  }",
+                  "  const roles = (claims.realm_access || {}).roles || [];",
+                  "  console.log('logged in:', claims.preferred_username || claims.email, '| roles:', roles.join(', '));",
+                  "  pm.test('token names the user (sub + preferred_username or email)', () => pm.expect(claims.sub && (claims.preferred_username || claims.email)).to.be.ok);",
+                  "  pm.test('has the provider role', () => pm.expect(roles).to.include(pm.variables.get('data_provider_role')));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2b. Data-provider approval (approve + submit the signed contract hash)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gov_url}}/job/approval/data-provider",
+            "description": "Approves the caller's datasets (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c/1d). The signature is stored as submitted; the governance layer cross-verifies it in step 3.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{data_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into data_provider_signature.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{data_provider_signature}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{data_provider_token}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('this provider:', d.approval, '| all data providers:', d.data_provider, '| whole job:', d.job_approval);",
+                  "(d.entries || []).forEach(e => console.log(' ', e.provider_id, e.item, e.status, 'role=' + e.has_role, 'catalogue=' + e.in_catalogue, e.reason || ''));",
+                  "pm.test('data provider accepted', () => pm.expect(d.approval).to.eql('accepted'));",
+                  "pm.test('signed contract hash submitted', () => pm.expect(d.signature && d.signature.submitted).to.eql(true));",
+                  "if (d.signature) console.log('signature submitted for', d.signature.items_signed, 'item(s) - cross-verified at', d.signature.verified_at);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2c. Infra-provider approval (approve + submit the signed contract hash)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{gov_url}}/job/approval/infra-provider",
+            "description": "Approves the caller's infras (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c/1d). The signature is stored as submitted; the governance layer cross-verifies it in step 3.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{infra_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into infra_provider_signature.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{infra_provider_signature}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{infra_provider_token}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('this infra provider:', d.approval, '| all infra providers:', d.infra_provider, '| whole job:', d.job_approval);",
+                  "(d.entries || []).forEach(e => console.log(' ', e.provider_id, e.item, e.status, 'role=' + e.has_role, 'catalogue=' + e.in_catalogue, e.reason || ''));",
+                  "pm.test('infra provider accepted', () => pm.expect(d.approval).to.eql('accepted'));",
+                  "pm.test('signed contract hash submitted', () => pm.expect(d.signature && d.signature.submitted).to.eql(true));",
+                  "if (d.signature) console.log('signature submitted for', d.signature.items_signed, 'item(s) - cross-verified at', d.signature.verified_at);"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. Nothing is verified or posted to APD yet - that happens in step 3."
+    },
+    {
+      "name": "3. Governance layer cross-verifies the job (consumer)",
+      "item": [
+        {
+          "name": "3a. Job status - cross-verify (PUT /job/{job_id}/status)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{gov_url}}/job/{{job_id}}/status",
+              "host": [
+                "{{gov_url}}"
+              ],
+              "path": [
+                "job",
+                "{{job_id}}",
+                "status"
+              ]
+            },
+            "description": "The governance layer cross-verifies the job: every data and infra provider has approved, and each one's submitted contract_hash is its own hash of the contract and their signature verifies with their registered public key. If all hold it governance-signs the contract, posts the APD policy for every dataset and infra (this user may use it for this job_id + contract_id) and makes the contract final -> {status: approved}. Otherwise {status: not approved, reasons: [...]}.",
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('job', pm.variables.get('job_id'), ':', d.status);",
+                  "(d.reasons || []).forEach(r => console.log('  not approved because:', r));",
+                  "(d.signatures || []).forEach(p => console.log('  ', p.role, p.provider_id || p.infra_id, p.valid ? 'signature verified' : p.error));",
+                  "(d.grants || []).forEach(g => console.log('  APD policy', g.item_type, g.item_id, g.status, g.policy_id || '', g.error || ''));",
+                  "pm.test('approved (all approvals + signatures cross-verified)', () => pm.expect(d.status).to.eql('approved'));",
+                  "if (d.status === 'approved') {",
+                  "  pm.test('APD policy posted for the dataset', () => pm.expect(d.grants.some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
+                  "  pm.test('APD policy posted for the infra', () => pm.expect(d.grants.some(g => g.item_type === 'infra' && g.status === 'posted')).to.eql(true));",
+                  "  pm.test('contract is final', () => pm.expect(d.final_contract).to.eql(true));",
+                  "} else {",
+                  "  pm.execution.setNextRequest(null);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3b. Check the APD policies for this job (dataset + infra)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const grants = pm.response.json().data || [];",
+                  "grants.forEach(g => console.log(g.rules.item_type, g.itemId, '| owner', g.provider_id, '| user', g.rules.consumer, '| job', g.rules.job_id, '| contract', g.rules.contract_id, '| expires', g.expiresAt || 'never'));",
+                  "pm.test('dataset policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'dataset')).to.eql(true));",
+                  "pm.test('infra policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'infra')).to.eql(true));",
+                  "pm.test('all for this job', () => grants.forEach(g => pm.expect(g.rules.job_id).to.eql(pm.variables.get('job_id'))));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{apd_url}}/policy/grants?job_id={{job_id}}",
+              "host": [
+                "{{apd_url}}"
+              ],
+              "path": [
+                "policy",
+                "grants"
+              ],
+              "query": [
+                {
+                  "key": "job_id",
+                  "value": "{{job_id}}"
+                }
+              ]
+            },
+            "description": "GET /api/v1/policy/grants?job_id= on p3dx-apd: the consumer grants gov_layer posted when data providers approved this job."
+          }
+        }
+      ],
+      "description": "Step 3a is where the signatures are cross-verified; on approval the APD policies are posted and the contract becomes final. 3b reads the policies back from APD."
+    },
+    {
+      "name": "4. Verify all signatures (data + infra providers + governance)",
+      "item": [
+        {
+          "name": "4. Verify the signatures (cross-verify)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{gov_url}}/contracts/{{contract_id}}/signatures",
+            "description": "gov_layer cross-verifies the hash against its copy of the contract, its own signature, and every data provider's signature against their registered key. Answers only {\"signatures\": \"matching\", \"tee\": \"can run\"} or {\"signatures\": \"not matching\", \"tee\": \"cannot run\"}."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('signatures:', d.signatures, '| TEE:', d.tee);",
+                  "pm.test('signatures matching - TEE can run', () => pm.expect(d.tee).to.eql('can run'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Enable the TEE (consumer)",
+      "description": "Once the contract is final, the user who created the job enables the TEE run. This only marks it enabled - no VM is started; the run itself is POST /v1/tee/sessions with governanceContractId = contract_id, which is refused until this step is done.",
+      "item": [
+        {
+          "name": "5. Enable the TEE - POST /job/{job_id}/tee",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('TEE enabled', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log(d.tee || d.error, '|', d.message || d.next);",
+                  "pm.test('tee = enabled', () => pm.expect(d.tee).to.eql('enabled'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{gov_url}}/job/{{job_id}}/tee",
+              "host": [
+                "{{gov_url}}"
+              ],
+              "path": [
+                "job",
+                "{{job_id}}",
+                "tee"
+              ]
+            },
+            "description": "Consumer's token (1a). 409 CONTRACT_NOT_SIGNED / CONTRACT_NOT_FINAL until every data and infra provider has approved and signed; 403 for anyone but the job's user."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "cp_url",
+      "value": "https://v2.dev.iudx.io/controlplane"
+    },
+    {
+      "key": "gov_url",
+      "value": "http://localhost:8083/api/v1"
+    },
+    {
+      "key": "apd_url",
+      "value": "http://localhost:8082/api/v1"
+    },
+    {
+      "key": "catalogue_url",
+      "value": "https://v2.dev.iudx.io/controlplane/iudx/v2/cat"
+    },
+    {
+      "key": "keycloak_url",
+      "value": "https://v2.dev.iudx.io/auth"
+    },
+    {
+      "key": "realm",
+      "value": "iudx-v2"
+    },
+    {
+      "key": "client_id",
+      "value": "admin-cli"
+    },
+    {
+      "key": "client_secret",
+      "value": ""
+    },
+    {
+      "key": "username",
+      "value": "8adf42ccc9@emailnox.live"
+    },
+    {
+      "key": "password",
+      "value": ""
+    },
+    {
+      "key": "data_provider_username",
+      "value": "8adf42ccc9@emailnox.live"
+    },
+    {
+      "key": "data_provider_password",
+      "value": ""
+    },
+    {
+      "key": "data_provider_role",
+      "value": "provider"
+    },
+    {
+      "key": "data_provider_public_key",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_username",
+      "value": "8adf42ccc9@emailnox.live"
+    },
+    {
+      "key": "infra_provider_password",
+      "value": ""
+    },
+    {
+      "key": "data_provider_id",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_id",
+      "value": ""
+    },
+    {
+      "key": "dataset_id",
+      "value": ""
+    },
+    {
+      "key": "dataset_name",
+      "value": "test databank onboarding 01"
+    },
+    {
+      "key": "policy_id",
+      "value": ""
+    },
+    {
+      "key": "infra_id_1",
+      "value": "infra-devtest-1"
+    },
+    {
+      "key": "infra_id_2",
+      "value": "infra-devtest-2"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "data_provider_token",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_token",
+      "value": ""
+    },
+    {
+      "key": "job_id",
+      "value": ""
+    },
+    {
+      "key": "contract_id",
+      "value": ""
+    },
+    {
+      "key": "contract_hash",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_public_key",
+      "value": ""
+    },
+    {
+      "key": "data_provider_signature",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_signature",
+      "value": ""
+    }
+  ]
+}

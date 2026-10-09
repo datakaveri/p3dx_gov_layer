@@ -22,7 +22,6 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/keycloak"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/userdir"
 )
 
 // maxBodyBytes mirrors express.json({ limit: "5mb" }).
@@ -40,8 +39,8 @@ type Server struct {
 	// teeSessions tracks the provision->attest->run->output sequences started
 	// by POST /v1/tee/sessions (tee_session.go).
 	teeSessions *teeSessionRegistry
-	// publicKeys resolves a data provider's registered public key from the
-	// platform Keycloak, to verify contract signatures (contract_signing.go).
+	// publicKeys resolves a provider's registered public key from Postgres
+	// (provider_public_keys), to verify contract signatures (contract_signing.go).
 	publicKeys publicKeyLookup
 	// govKey is gov_layer's own key pair; it signs each contract hash before
 	// the hash goes out to data providers (contract_signing.go).
@@ -58,7 +57,7 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *servi
 		http:        &http.Client{},
 		tees:        newTEERegistry(),
 		teeSessions: newTEESessionRegistry(),
-		publicKeys:  userdir.New(cfg),
+		publicKeys:  dbPublicKeys{database},
 		govKey:      govKey,
 	}
 }
@@ -82,6 +81,10 @@ func (s *Server) Handler() http.Handler {
 // helps to hit url to the respective handler
 func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/data-providers", s.getDataProviders)
+
+	// provider contract-signing public keys (provider_keys.go)
+	r.Put("/provider-keys/{role}", s.putProviderKey)
+	r.Get("/provider-keys/{role}/status", s.getProviderKeyStatus)
 	r.Post("/send-provider-message", s.sendProviderMessage)
 
 	// participation-consent notifications (fl_notifications.go)
@@ -123,6 +126,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/contracts/{contractId}/sign", s.handleSignContract)
 	r.Get("/contracts/{contractId}/signatures", s.getContractSignatures)
 	r.Get("/contracts/by-session/{sessionId}/signatures", s.getSessionContractSignatures)
+
+	// Job approvals (job_approval.go): role + catalogue checks for every
+	// data/infra provider on a contract's job_id, recorded in the audit table.
+	r.Post("/job/approval/data-provider", s.handleDataProviderApproval)
+	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
+	r.Put("/job/{jobId}/status", s.putJobStatus)
+	r.Post("/job/{jobId}/tee", s.enableJobTEE)
 	//for the model.go
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)

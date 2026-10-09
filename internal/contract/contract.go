@@ -55,10 +55,13 @@ type UserParty struct {
 	Signature   Signature `json:"signature"`
 }
 
-// DataProviderParty is one dataset contributor.
+// DataProviderParty is one dataset contributor. DatasetID is the dataset's
+// DX catalogue item id (job approval looks it up there); omitempty keeps the
+// hash of contracts generated before it was recorded unchanged.
 type DataProviderParty struct {
 	ID             string      `json:"id"`
 	Name           string      `json:"name"`
+	DatasetID      string      `json:"dataset_id,omitempty"`
 	DatasetName    string      `json:"dataset_name"`
 	DatasetVersion string      `json:"dataset_version"`
 	DataURL        string      `json:"data_url"`
@@ -147,8 +150,11 @@ type SessionInfo struct {
 // session/roster builder and the FL/TEE/SMPC generate-contract preview
 // builder.
 type Contract struct {
-	ProjectID     string      `json:"project_id"`
-	ContractID    string      `json:"contract_id"`
+	ProjectID  string `json:"project_id"`
+	ContractID string `json:"contract_id"`
+	// JobID is unique per contract. omitempty keeps the hash of contracts
+	// created before job_id existed unchanged.
+	JobID         string      `json:"job_id,omitempty"`
 	Version       int         `json:"version"`
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`

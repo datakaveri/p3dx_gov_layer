@@ -1,6 +1,8 @@
 package services
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,6 +72,91 @@ func FetchPolicyForDataset(datasetID, policyID, providerID, datasetName, techniq
 // private-dataset-style notice applies here.
 func FetchInfraPolicy(infraID string) (map[string]interface{}, error) {
 	return fetchProviderPolicy(infraID, "")
+}
+
+// ConsumerGrantPolicyType is rules.policy_type of a consumer grant; p3dx-apd
+// skips these in its by-item lookups (they share the dataset's item_id).
+const ConsumerGrantPolicyType = "consumer-grant"
+
+// Item types a consumer grant covers (rules.item_type).
+const (
+	GrantItemDataset = "dataset"
+	GrantItemInfra   = "infra"
+)
+
+// ConsumerGrant lets a job's consumer use one dataset or infra for that
+// job/contract. gov_layer posts one to APD per dataset and infra once the
+// job is approved.
+type ConsumerGrant struct {
+	JobID        string
+	ContractID   string
+	Consumer     string // the consumer's token sub (contract parties.user.id)
+	ConsumerName string
+	ItemType     string // GrantItemDataset / GrantItemInfra
+	ItemID       string // dataset: DX catalogue item id; infra: its APD item id
+	ItemName     string
+	Provider     string    // the item's provider_id (its data / infra provider)
+	ExpiresAt    time.Time // zero: no expiry
+}
+
+// PolicyID is the grant's APD policyId — one per job and item, so
+// re-approving updates the same grant.
+func (g ConsumerGrant) PolicyID() string { return "grant-" + g.JobID + "-" + g.ItemID }
+
+// PostConsumerGrant stores g in APD (POST /api/v1/policy, an upsert on
+// policyId) and returns its policyId.
+func PostConsumerGrant(ctx context.Context, client *http.Client, g ConsumerGrant) (string, error) {
+	baseURL := strings.TrimRight(os.Getenv("APD_BASE_URL"), "/")
+	if baseURL == "" {
+		return "", fmt.Errorf("APD_BASE_URL not set")
+	}
+	rules := map[string]any{
+		"policy_type":   ConsumerGrantPolicyType,
+		"item_type":     g.ItemType,
+		"job_id":        g.JobID,
+		"contract_id":   g.ContractID,
+		"consumer":      g.Consumer,
+		"consumer_name": g.ConsumerName,
+	}
+	body := map[string]any{
+		"policyId":    g.PolicyID(),
+		"itemId":      g.ItemID,
+		"issuedBy":    g.Provider,
+		"provider_id": g.Provider,
+		"rules":       rules,
+	}
+	if g.ItemType == GrantItemInfra {
+		rules["infra_provider"], rules["infra_id"], rules["infra_name"] = g.Provider, g.ItemID, g.ItemName
+	} else {
+		body["dataset_id"] = g.ItemID
+		rules["data_provider"], rules["dataset_id"], rules["dataset_name"] = g.Provider, g.ItemID, g.ItemName
+	}
+	if !g.ExpiresAt.IsZero() {
+		body["expiresAt"] = g.ExpiresAt.UTC()
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/api/v1/policy", bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("build APD grant request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("APD grant request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		var e struct {
+			Message string `json:"message"`
+			Error   string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&e)
+		return "", fmt.Errorf("APD refused the grant (%d): %s", resp.StatusCode, strings.TrimSpace(e.Message+" "+e.Error))
+	}
+	return g.PolicyID(), nil
 }
 
 // FetchPolicyForContractDataset extracts provider context from a contract for

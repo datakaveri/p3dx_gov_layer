@@ -39,6 +39,12 @@ func NewUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// NewJobID returns a fresh job id ("job-<unixMillis>-<rand9>"). Every contract
+// gets its own, minted before its hash is computed so it's part of what's signed.
+func NewJobID() string {
+	return newID("job", 9)
+}
+
 // existingDataProviderSignatures returns username -> signed_at for every
 // already-signed data-provider party on this session's currently stored
 // contract. A provider signs by accepting their participation notification
@@ -114,6 +120,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	c := &contract.Contract{
 		ProjectID:  projectID,
 		ContractID: contractID,
+		JobID:      NewJobID(),
 		Version:    version,
 		Lifecycle: contract.Lifecycle{
 			CreatedAt:  now,
@@ -159,27 +166,34 @@ func (d *DB) StoreContract(ctx context.Context, c *contract.Contract, finalized 
 	if pathway == "" {
 		pathway = "FL"
 	}
+	// Every contract must carry a job_id. Callers mint it before hashing; this
+	// is only a safety net so the column is never left empty.
+	if c.JobID == "" {
+		c.JobID = NewJobID()
+		log.Printf("[DATABASE] Warning: contract %s had no job_id, minted %s after hashing", c.ContractID, c.JobID)
+	}
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
 	var id string
 	err = d.Pool.QueryRow(ctx, `INSERT INTO contracts
-			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			(id, project_id, session_id, output_owner_id, finalized, pathway, contract, job_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (project_id) DO UPDATE SET
+			job_id = EXCLUDED.job_id,
 			output_owner_id = EXCLUDED.output_owner_id,
 			finalized = contracts.finalized OR EXCLUDED.finalized,
 			pathway = EXCLUDED.pathway,
 			contract = EXCLUDED.contract,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
-		newID("con", 9), c.ProjectID, c.SessionInfo.SessionID, c.Parties.User.ID, finalized, pathway, raw,
+		newID("con", 9), c.ProjectID, c.SessionInfo.SessionID, c.Parties.User.ID, finalized, pathway, raw, c.JobID,
 	).Scan(&id)
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[DATABASE] Contract stored (session=%s project=%s pathway=%s finalized=%t): %s", c.SessionInfo.SessionID, c.ProjectID, pathway, finalized, id)
+	log.Printf("[DATABASE] Contract stored (session=%s project=%s job=%s pathway=%s finalized=%t): %s", c.SessionInfo.SessionID, c.ProjectID, c.JobID, pathway, finalized, id)
 	return id, nil
 }
 
@@ -188,22 +202,26 @@ func (d *DB) StoreContract(ctx context.Context, c *contract.Contract, finalized 
 // keyed by consumer+dataset+technique (via the synthetic session_id below) so
 // regenerating the same selection overwrites the previous draft instead of
 // accumulating rows. contractJSON is pre-marshaled by the caller.
-func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, technique, contractID string, contractJSON []byte) (string, error) {
+func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, technique, contractID, jobID string, contractJSON []byte) (string, error) {
 	sessionKey := fmt.Sprintf("preview:%s:%s:%s", consumerID, datasetID, technique)
 
 	var id string
 	err := d.Pool.QueryRow(ctx, `INSERT INTO contracts
-			(id, project_id, session_id, output_owner_id, finalized, pathway, contract)
-			VALUES ($1, $2, $3, $4, false, 'PREVIEW', $5)
+			(id, project_id, session_id, output_owner_id, finalized, pathway, contract, job_id)
+			VALUES ($1, $2, $3, $4, false, 'PREVIEW', $5, $6)
 		ON CONFLICT (session_id) WHERE session_id LIKE 'preview:%' DO UPDATE SET
 			project_id = EXCLUDED.project_id,
+			job_id = EXCLUDED.job_id,
+			sign_requests_sent_at = NULL,
+			finalized_at = NULL,
+			tee_enabled_at = NULL,
 			output_owner_id = EXCLUDED.output_owner_id,
 			finalized = false,
 			pathway = 'PREVIEW',
 			contract = EXCLUDED.contract,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING id`,
-		newID("con", 9), contractID, sessionKey, consumerID, contractJSON,
+		newID("con", 9), contractID, sessionKey, consumerID, contractJSON, jobID,
 	).Scan(&id)
 	if err != nil {
 		return "", err

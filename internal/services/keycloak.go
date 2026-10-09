@@ -40,6 +40,12 @@ func FetchKeycloakJWKS() (map[string]*rsa.PublicKey, error) {
 		}
 		jwksURL = base + "/realms/" + realm + "/protocol/openid-connect/certs"
 	}
+	return FetchJWKS(jwksURL)
+}
+
+// FetchJWKS fetches the JWKS at jwksURL and returns its RSA public keys,
+// indexed by kid ("default" when a key has none).
+func FetchJWKS(jwksURL string) (map[string]*rsa.PublicKey, error) {
 	resp, err := http.Get(jwksURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch JWKS: %w", err)
@@ -104,7 +110,24 @@ func ValidateAccessToken(tokenStr string) (*jwt.Token, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseWithKeys(tokenStr, keysByKID)
+}
 
+// ValidateAccessTokenAt is ValidateAccessToken against an explicit JWKS URL,
+// for tokens issued by a different Keycloak than KEYCLOAK_JWKS_URL's (e.g. the
+// platform Keycloak providers log in through, see provider_keys.go).
+func ValidateAccessTokenAt(tokenStr, jwksURL string) (*jwt.Token, error) {
+	if tokenStr == "" {
+		return nil, fmt.Errorf("empty token")
+	}
+	keysByKID, err := FetchJWKS(jwksURL)
+	if err != nil {
+		return nil, err
+	}
+	return parseWithKeys(tokenStr, keysByKID)
+}
+
+func parseWithKeys(tokenStr string, keysByKID map[string]*rsa.PublicKey) (*jwt.Token, error) {
 	parser := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}))
 	return parser.Parse(tokenStr, func(t *jwt.Token) (any, error) {
 		kid, _ := t.Header["kid"].(string)

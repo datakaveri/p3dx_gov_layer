@@ -201,11 +201,17 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		Infras: infraInputs,
 	})
 
-	// TEE/SMPC: gov_layer signs the hash with its own key before storing, so
-	// the stored copy carries the governance signature providers verify.
-	// Best-effort here — without it the sign requests just aren't sent, and
-	// the run gate stays closed.
-	if req.Technique != "FL" && contract.ContractHash != "" {
+	// A contract naming both datasets and infra needs job approval first; it
+	// is hashed and governance-signed only once that job is approved
+	// (sealContract, job_approval.go), so it is stored without either here.
+	needsApproval := needsJobApproval(&contract)
+	if needsApproval {
+		contract.ContractHash = ""
+	} else if req.Technique != "FL" && contract.ContractHash != "" {
+		// Other TEE/SMPC contracts: gov_layer signs the hash with its own key
+		// before storing, so the stored copy carries the governance signature
+		// providers verify. Best-effort — without it the sign requests just
+		// aren't sent, and the run gate stays closed.
 		if err := s.governanceSign(&contract); err != nil {
 			log.Printf("[GENERATE] Warning: failed to governance-sign contract %s: %v", contract.ContractID, err)
 		}
@@ -221,7 +227,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 
 	stored := false
 	if contractJSON, err := json.Marshal(contract); err == nil {
-		if _, dbErr := s.db.StoreGeneratedContract(r.Context(), consumerID, datasetKey, req.Technique, contract.ContractID, contractJSON); dbErr != nil {
+		if _, dbErr := s.db.StoreGeneratedContract(r.Context(), consumerID, datasetKey, req.Technique, contract.ContractID, contract.JobID, contractJSON); dbErr != nil {
 			log.Printf("[GOVERNANCE] Warning: Failed to store generated contract in DB: %v", dbErr)
 		} else {
 			stored = true
@@ -237,18 +243,41 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	// stored — signing verifies against the stored copy, so an unstored
 	// contract could never be signed. FL sends its sign requests from
 	// postContract once the final roster contract exists instead.
+	//
+	// Job approval comes first: a contract naming both datasets and infra
+	// is hashed, governance-signed and sent out only once
+	// POST /job/approval/data-provider and /job/approval/infra-provider have
+	// both accepted its job_id (job_approval.go).
+	sender, _ := claims["preferred_username"].(string)
+	if sender == "" {
+		sender = consumerID
+	}
+
+	// A job that needs approval: ask each of its data and infra providers to
+	// approve or reject it (job_request.go).
+	providersNotified := 0
+	if needsApproval && stored {
+		providersNotified = s.notifyJobRequest(r.Context(), contract, sender)
+	}
+
 	signRequestsSent := 0
-	if req.Technique != "FL" && stored && contract.GovernanceSignature != nil {
-		sender, _ := claims["preferred_username"].(string)
-		if sender == "" {
-			sender = consumerID
-		}
-		signRequestsSent = s.notifyContractSigners(r.Context(), contract, sender)
+	signing := "not_applicable"
+	switch {
+	case req.Technique == "FL" || !stored:
+	case needsApproval:
+		signing = "on_hold_pending_approval"
+		log.Printf("[GENERATE] Job %s: contract is hashed, governance-signed and sent for signing once its job approval is accepted", contract.JobID)
+	case contract.GovernanceSignature != nil:
+		signRequestsSent = s.sendSignRequestsOnce(r.Context(), contract, sender)
+		signing = "requested"
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":             "success",
 		"contract":           contract,
 		"sign_requests_sent": signRequestsSent,
+		"signing":            signing,
+		"approval_required":  needsApproval,
+		"providers_notified": providersNotified,
 	})
 }
