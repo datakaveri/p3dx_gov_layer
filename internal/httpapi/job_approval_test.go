@@ -132,7 +132,7 @@ func stubDXCatalogue(t *testing.T) string {
 		}
 		switch id := r.URL.Query().Get("id"); {
 		case r.URL.Path == "/item" && id == dsHeart:
-			_, _ = w.Write([]byte(`{"type":"urn:dx:controlPlane:success","result":[{"id":"` + dsHeart + `","name":"heart","type":["adex:DataBank"]}]}`))
+			_, _ = w.Write([]byte(`{"type":"urn:dx:controlPlane:success","result":[{"id":"` + dsHeart + `","name":"heart","type":["adex:DataBank"],"uploadedBy":"alice@example.com"}]}`))
 		case r.URL.Path == "/item" && id == dsApp:
 			_, _ = w.Write([]byte(`{"type":"urn:dx:controlPlane:success","result":[{"id":"` + dsApp + `","name":"app","type":["adex:Apps"]}]}`))
 		default:

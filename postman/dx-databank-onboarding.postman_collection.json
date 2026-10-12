@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "DX DataBank onboarding + job approval flow",
-    "description": "End-to-end flow: data provider onboards a DataBank in the DX catalogue, consumer creates a job (draft contract) on it, data + infra providers approve it - each approval also posts their APD policy and their signature of the contract hash (keys generated on their own machine) - and the governance layer verifies.\n\nSetup: fill the *_username / *_password variables (or paste full tokens from the dev portal into data_provider_token / infra_provider_token / access_token). Change dataset_name on every run of A1b (catalogue names are unique); A1b saves the new item id into dataset_id.\n\nServices: cp_url = DX Control Plane (dev), gov_url = p3dx_gov_layer (8083), apd_url = p3dx-apd (8082).\n\nNot implemented yet (planned): provider GET inbox of pending jobs, reject, GET job status.",
+    "description": "NOTE: the infra-provider flow is a dummy for now (collection variable skip_infra_flow = \"true\"): A2, 1d and 2c are skipped and the infra checks in 3a/3b are off - only the data-provider side is checked. Pairs with REQUIRE_INFRA_APPROVAL=false in p3dx_gov_layer/.env.\n\nEnd-to-end flow: data provider onboards a DataBank in the DX catalogue, consumer creates a job (draft contract) on it, data + infra providers approve it - each approval also posts their APD policy and their signature of the contract hash (keys generated on their own machine) - and the governance layer verifies.\n\nSetup: fill the *_username / *_password variables (or paste full tokens from the dev portal into data_provider_token / infra_provider_token / access_token). Change dataset_name on every run of A1b (catalogue names are unique); A1b saves the new item id into dataset_id.\n\nServices: cp_url = DX Control Plane (dev), gov_url = p3dx_gov_layer (8083), apd_url = p3dx-apd (8082).\n\nNot implemented yet (planned): provider GET inbox of pending jobs, reject, GET job status.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -82,11 +82,15 @@
                   "script": {
                     "type": "text/javascript",
                     "exec": [
-                      "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                      "pm.test('DataBank created (200/201)', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
                       "const res = pm.response.json();",
-                      "if (res.result && res.result.id) {",
-                      "  pm.collectionVariables.set('dataset_id', res.result.id);",
-                      "  console.log('dataset_id =', res.result.id);",
+                      "pm.test('control plane says success', () => pm.expect(res.type).to.eql('urn:dx:controlPlane:success'));",
+                      "const id = res.result && (res.result.itemId || res.result.id);",
+                      "pm.test('item id returned', () => pm.expect(id).to.be.a('string').and.not.empty);",
+                      "if (id) {",
+                      "  pm.collectionVariables.set('dataset_id', id);",
+                      "  if (res.result.itemName) pm.collectionVariables.set('dataset_name', res.result.itemName);",
+                      "  console.log('dataset_id =', id, '| name =', res.result.itemName || pm.variables.get('dataset_name'));",
                       "}"
                     ]
                   }
@@ -122,7 +126,7 @@
                     ""
                   ]
                 },
-                "description": "POST /iudx/v2/cat/item - creates the DataBank catalogue item. On 201, `result.id` is saved to `dataset_id`.\n\nExpect: itemStatus VERIFIED (if org_admin), publishStatus PENDING, dataUploadStatus false.",
+                "description": "POST /iudx/v2/cat/item - creates the DataBank catalogue item. On success (200/201), `result.itemId` is saved to `dataset_id` (and `result.itemName` to `dataset_name`).\n\nExpect: itemStatus VERIFIED (if org_admin), publishStatus PENDING, dataUploadStatus false.",
                 "auth": {
                   "type": "bearer",
                   "bearer": [
@@ -195,12 +199,12 @@
           "name": "A2. Infra provider: onboard the infras + register the public key",
           "item": [
             {
-              "name": "A2a. Login as infra provider",
+              "name": "[dummy] A2a. Login as infra provider",
               "request": {
                 "method": "POST",
                 "header": [],
                 "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
-                "description": "Infra provider's dev Keycloak token, saved as infra_provider_token (used to submit the infras).",
+                "description": "Infra provider's dev Keycloak token, saved as infra_provider_token (used to submit the infras).\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again.",
                 "body": {
                   "mode": "urlencoded",
                   "urlencoded": [
@@ -229,6 +233,18 @@
               },
               "event": [
                 {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                      "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                      "  pm.execution.skipRequest();",
+                      "}"
+                    ]
+                  }
+                },
+                {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
@@ -256,7 +272,7 @@
               ]
             },
             {
-              "name": "A2b. Onboard infra 1 (APD infra catalogue)",
+              "name": "[dummy] A2b. Onboard infra 1 (APD infra catalogue)",
               "request": {
                 "method": "POST",
                 "header": [
@@ -266,7 +282,7 @@
                   }
                 ],
                 "url": "{{apd_url}}/policy",
-                "description": "Registers infra_id_1 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_1 to register a new infra; consumers pick it in 1b and 2c checks it.",
+                "description": "Registers infra_id_1 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_1 to register a new infra; consumers pick it in 1b and 2c checks it.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again.",
                 "body": {
                   "mode": "raw",
                   "raw": "{\n  \"policyId\": \"pol-{{infra_id_1}}\",\n  \"itemId\": \"{{infra_id_1}}\",\n  \"issuedBy\": \"{{infra_provider_id}}\",\n  \"provider_id\": \"{{infra_provider_id}}\",\n  \"rules\": {\n    \"policy_type\": \"infra-provider\",\n    \"infrastructure\": {\n      \"name\": \"Dev test infra 1\",\n      \"region\": \"centralindia\",\n      \"platform\": {\n        \"provider\": \"azure\"\n      },\n      \"attestation\": {\n        \"required\": false,\n        \"service\": \"\",\n        \"policy_id\": \"\"\n      },\n      \"capacity\": {\n        \"cpu_cores\": 4,\n        \"ram_mb\": 8192,\n        \"sgx_enabled\": false,\n        \"tdx_enabled\": false,\n        \"sev_snp_enabled\": false,\n        \"sev_enabled\": false,\n        \"nitro_enclave_enabled\": false\n      }\n    }\n  }\n}",
@@ -289,6 +305,18 @@
               },
               "event": [
                 {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                      "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                      "  pm.execution.skipRequest();",
+                      "}"
+                    ]
+                  }
+                },
+                {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
@@ -301,7 +329,7 @@
               ]
             },
             {
-              "name": "A2c. Onboard infra 2 (APD infra catalogue)",
+              "name": "[dummy] A2c. Onboard infra 2 (APD infra catalogue)",
               "request": {
                 "method": "POST",
                 "header": [
@@ -311,7 +339,7 @@
                   }
                 ],
                 "url": "{{apd_url}}/policy",
-                "description": "Registers infra_id_2 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_2 to register a new infra; consumers pick it in 1b and 2c checks it.",
+                "description": "Registers infra_id_2 in the APD infra catalogue (rules.policy_type infra-provider), owned by infra_provider_id - the infra equivalent of A1b. Change infra_id_2 to register a new infra; consumers pick it in 1b and 2c checks it.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again.",
                 "body": {
                   "mode": "raw",
                   "raw": "{\n  \"policyId\": \"pol-{{infra_id_2}}\",\n  \"itemId\": \"{{infra_id_2}}\",\n  \"issuedBy\": \"{{infra_provider_id}}\",\n  \"provider_id\": \"{{infra_provider_id}}\",\n  \"rules\": {\n    \"policy_type\": \"infra-provider\",\n    \"infrastructure\": {\n      \"name\": \"Dev test infra 2\",\n      \"region\": \"centralindia\",\n      \"platform\": {\n        \"provider\": \"azure\"\n      },\n      \"attestation\": {\n        \"required\": false,\n        \"service\": \"\",\n        \"policy_id\": \"\"\n      },\n      \"capacity\": {\n        \"cpu_cores\": 4,\n        \"ram_mb\": 8192,\n        \"sgx_enabled\": false,\n        \"tdx_enabled\": false,\n        \"sev_snp_enabled\": false,\n        \"sev_enabled\": false,\n        \"nitro_enclave_enabled\": false\n      }\n    }\n  }\n}",
@@ -334,6 +362,18 @@
               },
               "event": [
                 {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                      "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                      "  pm.execution.skipRequest();",
+                      "}"
+                    ]
+                  }
+                },
+                {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
@@ -346,8 +386,20 @@
               ]
             },
             {
-              "name": "A2d. Register the infra provider's public key (once)",
+              "name": "[dummy] A2d. Register the infra provider's public key (once)",
               "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                      "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                      "  pm.execution.skipRequest();",
+                      "}"
+                    ]
+                  }
+                },
                 {
                   "listen": "test",
                   "script": {
@@ -396,10 +448,11 @@
                     "infra-provider"
                   ]
                 },
-                "description": "Once per infra provider. Generate the key pair on the infra provider's own machine: `scripts/contract-sign.sh keygen keys/providers/<name>` - the private key stays there; paste the printed public key into infra_provider_public_key. gov_layer uses it to cross-check the signature sent with each approval."
+                "description": "Once per infra provider. Generate the key pair on the infra provider's own machine: `scripts/contract-sign.sh keygen keys/providers/<name>` - the private key stays there; paste the printed public key into infra_provider_public_key. gov_layer uses it to cross-check the signature sent with each approval.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
               }
             }
-          ]
+          ],
+          "description": "\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
         }
       ]
     },
@@ -547,8 +600,20 @@
           }
         },
         {
-          "name": "1d. Infra provider gets the request (JOB_REQUEST)",
+          "name": "[dummy] 1d. Infra provider gets the request (JOB_REQUEST)",
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                  "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -584,7 +649,7 @@
                 "{{infra_provider_id}}"
               ]
             },
-            "description": "The JOB_REQUEST notification gov_layer sent the infra provider when the job was created (1b): which of their items the user wants, for which job/contract, and the call to approve it with. It also carries the contract and its contract_hash - the same hash gov_layer signs and sends for signing (4a) once the job is approved."
+            "description": "The JOB_REQUEST notification gov_layer sent the infra provider when the job was created (1b): which of their items the user wants, for which job/contract, and the call to approve it with. It also carries the contract and its contract_hash - the same hash gov_layer signs and sends for signing (4a) once the job is approved.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
           }
         }
       ],
@@ -699,14 +764,19 @@
                   "(d.entries || []).forEach(e => console.log(' ', e.provider_id, e.item, e.status, 'role=' + e.has_role, 'catalogue=' + e.in_catalogue, e.reason || ''));",
                   "pm.test('data provider accepted', () => pm.expect(d.approval).to.eql('accepted'));",
                   "pm.test('signed contract hash submitted', () => pm.expect(d.signature && d.signature.submitted).to.eql(true));",
-                  "if (d.signature) console.log('signature submitted for', d.signature.items_signed, 'item(s) - cross-verified at', d.signature.verified_at);"
+                  "if (d.signature) console.log('signature submitted for', d.signature.items_signed, 'item(s) - cross-verified at', d.signature.verified_at);",
+                  "pm.test('signature verified against the registered public key', () => pm.expect(d.signature && d.signature.verified).to.eql(true));",
+                  "(d.grants || []).forEach(g => console.log('  APD policy', g.item_type, g.item_id, g.status, g.policy_id || '', g.error || ''));",
+                  "pm.test('APD policy posted: consumer may use the dataset', () => pm.expect((d.grants || []).some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
+                  "pm.test('job approved', () => pm.expect(d.job_approval).to.eql('accepted'));",
+                  "if (d.error === 'INVALID_SIGNATURE') console.log('signature rejected:', d.message);"
                 ]
               }
             }
           ]
         },
         {
-          "name": "2c. Infra-provider approval (approve + submit the signed contract hash)",
+          "name": "[dummy] 2c. Infra-provider approval (approve + submit the signed contract hash)",
           "request": {
             "method": "POST",
             "header": [
@@ -716,7 +786,7 @@
               }
             ],
             "url": "{{gov_url}}/job/approval/infra-provider",
-            "description": "Approves the caller's infras (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c/1d). The signature is stored as submitted; the governance layer cross-verifies it in step 3.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{infra_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into infra_provider_signature.",
+            "description": "Approves the caller's infras (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c/1d). The signature is stored as submitted; the governance layer cross-verifies it in step 3.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{infra_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into infra_provider_signature.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{infra_provider_signature}}\"\n}",
@@ -739,6 +809,18 @@
           },
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.variables.get('skip_infra_flow') === 'true') {",
+                  "  console.log('[dummy] ' + pm.info.requestName + ' skipped - infra-provider flow is off (skip_infra_flow=true)');",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -756,7 +838,7 @@
           ]
         }
       ],
-      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. Nothing is verified or posted to APD yet - that happens in step 3."
+      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. Nothing is verified or posted to APD yet - that happens in step 3.\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
     },
     {
       "name": "3. Governance layer cross-verifies the job (consumer)",
@@ -818,7 +900,7 @@
                   "pm.test('approved (all approvals + signatures cross-verified)', () => pm.expect(d.status).to.eql('approved'));",
                   "if (d.status === 'approved') {",
                   "  pm.test('APD policy posted for the dataset', () => pm.expect(d.grants.some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
-                  "  pm.test('APD policy posted for the infra', () => pm.expect(d.grants.some(g => g.item_type === 'infra' && g.status === 'posted')).to.eql(true));",
+                  "  if (pm.variables.get('skip_infra_flow') !== 'true') pm.test('APD policy posted for the infra', () => pm.expect(d.grants.some(g => g.item_type === 'infra' && g.status === 'posted')).to.eql(true));",
                   "  pm.test('contract is final', () => pm.expect(d.final_contract).to.eql(true));",
                   "} else {",
                   "  pm.execution.setNextRequest(null);",
@@ -840,7 +922,7 @@
                   "const grants = pm.response.json().data || [];",
                   "grants.forEach(g => console.log(g.rules.item_type, g.itemId, '| owner', g.provider_id, '| user', g.rules.consumer, '| job', g.rules.job_id, '| contract', g.rules.contract_id, '| expires', g.expiresAt || 'never'));",
                   "pm.test('dataset policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'dataset')).to.eql(true));",
-                  "pm.test('infra policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'infra')).to.eql(true));",
+                  "if (pm.variables.get('skip_infra_flow') !== 'true') pm.test('infra policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'infra')).to.eql(true));",
                   "pm.test('all for this job', () => grants.forEach(g => pm.expect(g.rules.job_id).to.eql(pm.variables.get('job_id'))));"
                 ]
               }
@@ -1077,6 +1159,10 @@
     {
       "key": "infra_provider_signature",
       "value": ""
+    },
+    {
+      "key": "skip_infra_flow",
+      "value": "true"
     }
   ]
 }

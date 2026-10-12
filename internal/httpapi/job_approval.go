@@ -575,8 +575,9 @@ func (s *Server) signApprovedItems(ctx context.Context, kind string, c *contract
 // POST /job/approval/data-provider — Authorization: Bearer <the data
 // provider's dev Keycloak token>, body {"job_id", "contract_hash",
 // "signature"}. Checks the caller's own datasets on the job's contract (see
-// dataProviderApprovals) and stores the signature on the accepted ones; it is
-// cross-verified at PUT /job/{jobId}/status.
+// dataProviderApprovals), verifies the signature (verifySubmittedSignature),
+// stores it on the accepted ones and posts their APD consumer grants; PUT
+// /job/{jobId}/status cross-verifies it again.
 func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.approverFromToken(w, r, "data provider")
 	if !ok {
@@ -606,7 +607,44 @@ func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Reque
 			own = append(own, e)
 		}
 	}
-	s.recordJobApproval(w, r, db.AuditTypeDataProvider, jobID, c, entries, own, caller, body)
+	// The signature is verified here, not only at PUT /job/{jobId}/status:
+	// an approval with a bad signature is refused and nothing is recorded.
+	if overallStatus(own) == db.AuditStatusAccepted {
+		if err := s.verifySubmittedSignature(reqCtx(r), c, caller, body); err != nil {
+			writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "INVALID_SIGNATURE", "message": err.Error()})
+			return
+		}
+	}
+	resp, ok := s.recordJobApproval(w, r, db.AuditTypeDataProvider, jobID, c, entries, own, caller, body)
+	if !ok {
+		return
+	}
+	// Accepted: the consumer may use the dataset — its APD consumer grant is
+	// posted now (PUT /job/{jobId}/status re-posts it; APD updates in place).
+	resp["grants"] = s.postConsumerGrants(reqCtx(r), db.AuditTypeDataProvider, jobID, c, own)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// verifySubmittedSignature checks the caller's approval signature now: the
+// submitted contract_hash must be gov_layer's own hash of the stored
+// contract, and the signature over it must verify with the caller's
+// registered public key (PUT /provider-keys/{role}).
+func (s *Server) verifySubmittedSignature(ctx context.Context, c *contract.Contract, caller providerCaller, body approvalBody) error {
+	hash, err := contract.ComputeHash(*c)
+	if err != nil {
+		return fmt.Errorf("contract could not be hashed: %w", err)
+	}
+	if body.ContractHash != hash {
+		return fmt.Errorf("contract_hash %s is not this job's contract hash (%s): sign the contract_hash from your JOB_REQUEST", body.ContractHash, hash)
+	}
+	pub, err := s.publicKeys.PublicKey(ctx, caller.username)
+	if err != nil {
+		return fmt.Errorf("no registered public key for %s (PUT /provider-keys/{role} first): %w", caller.username, err)
+	}
+	if err := services.VerifyContractHashSignature(pub, hash, body.Signature); err != nil {
+		return fmt.Errorf("signature does not verify with %s's registered public key: %w", caller.username, err)
+	}
+	return nil
 }
 
 // grantResult is one dataset's or infra's consumer grant in the approval
@@ -721,7 +759,9 @@ func (s *Server) handleInfraProviderApproval(w http.ResponseWriter, r *http.Requ
 			own = append(own, e)
 		}
 	}
-	s.recordJobApproval(w, r, db.AuditTypeInfraProvider, jobID, c, entries, own, caller, body)
+	if resp, ok := s.recordJobApproval(w, r, db.AuditTypeInfraProvider, jobID, c, entries, own, caller, body); ok {
+		writeJSON(w, http.StatusOK, resp)
+	}
 }
 
 // checkedItems is the auditKey of every current audit entry of kind on jobID.
@@ -802,23 +842,29 @@ func (s *Server) sealContract(ctx context.Context, c *contract.Contract) error {
 
 // recordJobApproval stores the caller's submitted signature on their own
 // items accepted in own (signApprovedItems), records the approval
-// (saveJobApproval) and writes the detailed response, whose "approval" is the
-// caller's own result.
-func (s *Server) recordJobApproval(w http.ResponseWriter, r *http.Request, kind, jobID string, c *contract.Contract, entries, own []db.AuditEntry, caller providerCaller, body approvalBody) {
+// (saveJobApproval) and returns the detailed response, whose "approval" is the
+// caller's own result, for the caller to write. On failure it has already
+// written the error response.
+func (s *Server) recordJobApproval(w http.ResponseWriter, r *http.Request, kind, jobID string, c *contract.Contract, entries, own []db.AuditEntry, caller providerCaller, body approvalBody) (j, bool) {
 	signed, err := s.signApprovedItems(reqCtx(r), kind, c, own, caller.username, body.ContractHash, body.Signature)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "failed to store the signature: " + err.Error()})
-		return
+		return nil, false
 	}
 	st, err := s.saveJobApproval(reqCtx(r), kind, jobID, entries)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
-		return
+		return nil, false
 	}
 	resp := jobApprovalResponse(kind, jobID, overallStatus(own), st, entries)
-	resp["signature"] = j{"submitted": signed > 0, "contract_hash": body.ContractHash, "items_signed": signed,
+	sig := j{"submitted": signed > 0, "contract_hash": body.ContractHash, "items_signed": signed,
 		"verified_at": "PUT /job/" + jobID + "/status"}
-	writeJSON(w, http.StatusOK, resp)
+	if kind == db.AuditTypeDataProvider && signed > 0 {
+		// verified before recording (handleDataProviderApproval)
+		sig["verified"] = true
+	}
+	resp["signature"] = sig
+	return resp, true
 }
 
 // finalizeJob makes an approved job's contract final once every signature on

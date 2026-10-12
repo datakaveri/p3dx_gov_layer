@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -100,6 +101,12 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		policy, err := services.FetchPolicyForDataset(d.DatasetID, "", req.ProviderID, datasetName, req.Technique, claims, lookupProvider)
 		if err != nil {
 			log.Printf("[GENERATE] Warning: no policy found in APD for dataset %s: %v", d.DatasetID, err)
+			if req.Technique != "FL" {
+				// TEE/SMPC without an APD policy: the dataset's DX catalogue
+				// owner (uploadedBy) is its provider, so the job request still
+				// reaches them and their approval call recognises them.
+				s.catalogueOwnerAsProvider(r.Context(), d.DatasetID, tokenStr, &in)
+			}
 		} else {
 			in.IsPrivate = services.IsPrivateDataset(policy)
 			if url, ok := policy["data_url"].(string); ok {
@@ -280,4 +287,24 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		"approval_required":  needsApproval,
 		"providers_notified": providersNotified,
 	})
+}
+
+// catalogueOwnerAsProvider sets in's provider to the DX catalogue item's
+// owner (uploadedBy, a username/email) when APD has no policy naming one, so
+// a TEE/SMPC dataset's provider is still known: provider_id
+// "provider-<slug(uploadedBy)>", name uploadedBy. A failed lookup leaves in
+// unchanged (the dataset then has no known provider, as before).
+func (s *Server) catalogueOwnerAsProvider(ctx context.Context, datasetID, token string, in *services.DatasetInput) {
+	item, err := s.lookupCatalogueItem(ctx, datasetID, token)
+	if err != nil {
+		log.Printf("[GENERATE] Warning: dataset %s: DX catalogue lookup failed, provider unknown: %v", datasetID, err)
+		return
+	}
+	if item.UploadedBy == "" {
+		log.Printf("[GENERATE] Warning: dataset %s: DX catalogue item has no uploadedBy, provider unknown", datasetID)
+		return
+	}
+	in.ProviderID = providerIDForUsername(item.UploadedBy)
+	in.ProviderName = item.UploadedBy
+	log.Printf("[GENERATE] Dataset %s: no APD policy, provider %s taken from its DX catalogue owner", datasetID, in.ProviderID)
 }

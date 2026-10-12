@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
 func approvalContract() *contract.Contract {
@@ -166,5 +168,66 @@ func TestRequireTEEEnabledSkipsNonJobContracts(t *testing.T) {
 	}}
 	if err := (&Server{}).requireTEEEnabled(context.Background(), c); err != nil {
 		t.Fatalf("err = %v, want nil for a non-job contract", err)
+	}
+}
+
+// POST /job/approval/data-provider verifies the submitted signature at once:
+// over gov_layer's own hash of the stored contract, with the caller's
+// registered public key.
+func TestVerifySubmittedSignature(t *testing.T) {
+	alice, alicePub := newRSAKey(t)
+	other, _ := newRSAKey(t)
+	srv := newTestServer(&config.Config{})
+	srv.publicKeys = stubKeys{"alice@example.com": alicePub}
+
+	c := approvalContract()
+	hash, err := contract.ComputeHash(*c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caller := providerCaller{username: "alice@example.com"}
+	stranger := providerCaller{username: "mallory@example.com"}
+	for _, tc := range []struct {
+		name    string
+		caller  providerCaller
+		body    approvalBody
+		wantErr string
+	}{
+		{"valid", caller, approvalBody{ContractHash: hash, Signature: signWith(t, alice, hash)}, ""},
+		{"other hash", caller, approvalBody{ContractHash: "sha256:00", Signature: signWith(t, alice, "sha256:00")}, "is not this job's contract hash"},
+		{"wrong key", caller, approvalBody{ContractHash: hash, Signature: signWith(t, other, hash)}, "does not verify"},
+		{"no registered key", stranger, approvalBody{ContractHash: hash, Signature: signWith(t, alice, hash)}, "no registered public key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := srv.verifySubmittedSignature(context.Background(), c, tc.caller, tc.body)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("err = %v, want nil", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Without an APD policy, a TEE/SMPC dataset's provider is its DX catalogue
+// owner (uploadedBy).
+func TestCatalogueOwnerAsProvider(t *testing.T) {
+	srv := newTestServer(&config.Config{CatalogueBaseURL: stubDXCatalogue(t)})
+
+	var in services.DatasetInput
+	srv.catalogueOwnerAsProvider(context.Background(), dsHeart, "tok-alice", &in)
+	if in.ProviderID != "provider-alice-example-com" || in.ProviderName != "alice@example.com" {
+		t.Fatalf("provider = %q / %q, want provider-alice-example-com / alice@example.com", in.ProviderID, in.ProviderName)
+	}
+	alice := callerFromClaims("tok-alice", jwt.MapClaims{"preferred_username": "alice@example.com"})
+	if !alice.is(contract.DataProviderParty{ID: in.ProviderID, Name: in.ProviderName}) {
+		t.Error("the catalogue owner is not recognised as the dataset's provider")
+	}
+
+	in = services.DatasetInput{}
+	srv.catalogueOwnerAsProvider(context.Background(), dsMissing, "tok-alice", &in)
+	if in.ProviderID != "" {
+		t.Errorf("unknown dataset: provider = %q, want none", in.ProviderID)
 	}
 }
