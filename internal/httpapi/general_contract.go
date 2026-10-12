@@ -11,6 +11,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
@@ -131,6 +132,9 @@ func (s *Server) handleFLContract(w http.ResponseWriter, r *http.Request, req Co
 	// Store contract in database with FL pathway
 	parsedContract := &contract.Contract{}
 	if err := json.Unmarshal(contractBytes, parsedContract); err == nil {
+		if parsedContract.JobID == "" {
+			parsedContract.JobID = db.NewJobID()
+		}
 		if hash, hashErr := contract.ComputeHash(*parsedContract); hashErr == nil {
 			parsedContract.ContractHash = hash
 		}
@@ -216,6 +220,9 @@ func (s *Server) handleGeneralContract(w http.ResponseWriter, r *http.Request, r
 	// Store contract in database with GENERAL pathway
 	parsedContract := &contract.Contract{}
 	if err := json.Unmarshal(contractBytes, parsedContract); err == nil {
+		if parsedContract.JobID == "" {
+			parsedContract.JobID = db.NewJobID()
+		}
 		if hash, hashErr := contract.ComputeHash(*parsedContract); hashErr == nil {
 			parsedContract.ContractHash = hash
 		}

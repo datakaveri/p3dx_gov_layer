@@ -10,3 +10,6 @@ node_modules/
 
 # Governance contract-signing key pair (generated on first start)
 keys/governance_signing_key.pem
+
+# Test data-provider key pairs made by scripts/contract-sign.sh keygen
+keys/providers/

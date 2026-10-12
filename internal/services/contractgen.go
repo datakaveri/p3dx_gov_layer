@@ -97,6 +97,7 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		dataProviders = append(dataProviders, contract.DataProviderParty{
 			ID:             d.ProviderID,
 			Name:           dataProviderName,
+			DatasetID:      d.DatasetID,
 			DatasetName:    d.DatasetName,
 			DatasetVersion: "v1",
 			DataURL:        d.DataURL,
@@ -168,6 +169,7 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 
 	c := contract.Contract{
 		ContractID: db.NewUUID(),
+		JobID:      db.NewJobID(),
 		Version:    1,
 		Lifecycle: contract.Lifecycle{
 			CreatedAt:  now,

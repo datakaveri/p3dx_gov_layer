@@ -8,7 +8,9 @@ package httpapi
 //  2. The hash, the governance signature and the governance public key go to
 //     every data provider as a CONTRACT_SIGN notification (notifyContractSigners).
 //     FL sends these once the final roster contract is built; TEE and SMPC
-//     when the consumer generates the contract.
+//     when the consumer generates the contract — or, for a contract naming
+//     datasets and infra, only once its job is approved (job_approval.go),
+//     which is also when that contract is hashed and governance-signed.
 //  3. The provider verifies the governance signature with the governance
 //     public key, then signs the same hash with their own RSA private key and
 //     posts it back (POST /contracts/{contractId}/sign).
@@ -24,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"time"
@@ -32,7 +35,7 @@ import (
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/userdir"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
 
 // ContractSignNotificationType tags the notification payload so callers
@@ -43,8 +46,8 @@ const ContractSignNotificationType = "CONTRACT_SIGN"
 // governanceSigner is the Signer recorded on a contract's governance signature.
 const governanceSigner = "governance-layer"
 
-// publicKeyLookup resolves a Keycloak username to their registered PEM public
-// key. *userdir.Client in production; stubbed in tests.
+// publicKeyLookup resolves a username to their registered PEM public key.
+// dbPublicKeys (provider_public_keys in Postgres) in production; stubbed in tests.
 type publicKeyLookup interface {
 	PublicKey(ctx context.Context, username string) (string, error)
 }
@@ -188,8 +191,10 @@ func (s *Server) loadContract(ctx context.Context, contractID string) (*contract
 // partySignatureStatus is one data-provider party's signing state, as
 // reported by GET /contracts/{id}/signatures and checked by the run gate.
 type partySignatureStatus struct {
+	Role        string     `json:"role"` // db.AuditTypeDataProvider / db.AuditTypeInfraProvider
 	ProviderID  string     `json:"provider_id"`
-	DatasetName string     `json:"dataset_name"`
+	DatasetName string     `json:"dataset_name,omitempty"`
+	InfraID     string     `json:"infra_id,omitempty"`
 	Signed      bool       `json:"signed"`
 	Valid       bool       `json:"valid"`
 	Signer      string     `json:"signer,omitempty"`
@@ -197,28 +202,32 @@ type partySignatureStatus struct {
 	Error       string     `json:"error,omitempty"`
 }
 
-// verifyContractSignatures re-checks every data-provider party on c: the
-// contract hash must still match its content, and each party's recorded
-// signature must verify against the signer's current Keycloak public key.
-// allValid is true only when the governance signature is valid, there is at
-// least one party, and all are valid.
+// verifyContractSignatures re-checks every signature on c: the contract hash
+// must still match its content, the governance signature must verify, and so
+// must every provider's (providerSignatures). allValid is true only when all
+// do and there is at least one data provider.
 func (s *Server) verifyContractSignatures(ctx context.Context, c *contract.Contract) (parties []partySignatureStatus, hashOK, allValid bool) {
 	hash, err := contract.ComputeHash(*c)
 	hashOK = err == nil && hash == c.ContractHash
+	parties, allValid = s.providerSignatures(ctx, c, hash, hashOK, nil)
+	allValid = allValid && hashOK && s.governanceSignatureValid(c, hash) && len(c.Parties.DataProviders) > 0
+	return parties, hashOK, allValid
+}
 
+// providerSignatures checks each data-provider party on c — and, on a
+// job-approval contract (needsJobApproval) with infra approval required, each
+// selected infra — for a recorded signature over hash that verifies against
+// the signer's registered public key. A data provider must have signed as
+// their own provider_id; an infra as its owner in infraOwnerIDs (infra id ->
+// provider_id) when given. hashOK false fails every party (the contract no
+// longer matches its hash).
+func (s *Server) providerSignatures(ctx context.Context, c *contract.Contract, hash string, hashOK bool, infraOwnerIDs map[string]string) (parties []partySignatureStatus, allValid bool) {
+	allValid = true
 	keys := map[string]string{}
-	allValid = hashOK && s.governanceSignatureValid(c, hash) && len(c.Parties.DataProviders) > 0
-	for _, p := range c.Parties.DataProviders {
-		providerID := partyProviderID(p)
-		st := partySignatureStatus{
-			ProviderID:  providerID,
-			DatasetName: p.DatasetName,
-			// Only a recorded signature counts — FL's accept-invite marker
-			// sets SignedAt without one.
-			Signed:   p.Signature.Value != "",
-			Signer:   p.Signature.Signer,
-			SignedAt: p.Signature.SignedAt,
-		}
+	check := func(st partySignatureStatus, sig contract.Signature, wantProviderID string) partySignatureStatus {
+		// Only a recorded signature counts — FL's accept-invite marker sets
+		// SignedAt without one.
+		st.Signed, st.Signer, st.SignedAt = sig.Value != "", sig.Signer, sig.SignedAt
 		if !st.Signed {
 			st.SignedAt = nil
 		}
@@ -227,22 +236,23 @@ func (s *Server) verifyContractSignatures(ctx context.Context, c *contract.Contr
 			st.Error = "not signed yet"
 		case !hashOK:
 			st.Error = "contract content no longer matches its hash"
-		case p.Signature.SignedHash != hash:
-			st.Error = "signature is over a different hash"
-		case providerIDForUsername(p.Signature.Signer) != providerID:
+		case sig.SignedHash != hash:
+			st.Error = "signed a different contract hash"
+		case wantProviderID != "" && providerIDForUsername(sig.Signer) != wantProviderID:
 			st.Error = "signer does not match provider_id"
 		default:
-			pub, ok := keys[p.Signature.Signer]
+			pub, ok := keys[sig.Signer]
 			if !ok {
-				pub, err = s.publicKeys.PublicKey(ctx, p.Signature.Signer)
+				var err error
+				pub, err = s.publicKeys.PublicKey(ctx, sig.Signer)
 				if err != nil {
 					st.Error = "public key lookup failed: " + err.Error()
 					break
 				}
-				keys[p.Signature.Signer] = pub
+				keys[sig.Signer] = pub
 			}
-			if err := services.VerifyContractHashSignature(pub, hash, p.Signature.Value); err != nil {
-				st.Error = err.Error()
+			if err := services.VerifyContractHashSignature(pub, hash, sig.Value); err != nil {
+				st.Error = "signature does not verify with the signer's public key: " + err.Error()
 			} else {
 				st.Valid = true
 			}
@@ -250,9 +260,35 @@ func (s *Server) verifyContractSignatures(ctx context.Context, c *contract.Contr
 		if !st.Valid {
 			allValid = false
 		}
-		parties = append(parties, st)
+		return st
 	}
-	return parties, hashOK, allValid
+
+	for _, p := range c.Parties.DataProviders {
+		providerID := partyProviderID(p)
+		parties = append(parties, check(partySignatureStatus{Role: db.AuditTypeDataProvider, ProviderID: providerID, DatasetName: p.DatasetName}, p.Signature, providerID))
+	}
+	if needsJobApproval(c) && (s.cfg == nil || s.cfg.RequireInfraApproval) {
+		for _, ip := range c.Parties.InfraProviders {
+			if ip.ID == "" {
+				continue
+			}
+			st := partySignatureStatus{Role: db.AuditTypeInfraProvider, InfraID: ip.ID}
+			if ip.Signature.Signer != "" {
+				st.ProviderID = providerIDForUsername(ip.Signature.Signer)
+			}
+			parties = append(parties, check(st, ip.Signature, infraOwnerIDs[ip.ID]))
+		}
+	}
+	return parties, allValid
+}
+
+// partyLabel names p in pending-signature messages: an unsigned infra has no
+// signer (so no provider_id) yet.
+func partyLabel(p partySignatureStatus) string {
+	if p.InfraID != "" {
+		return "infra " + p.InfraID
+	}
+	return p.ProviderID
 }
 
 // signatureGateError is the 403 every run gate returns while a contract is
@@ -293,13 +329,13 @@ func (s *Server) requireAllProvidersSigned(ctx context.Context, contractID strin
 		var pending []string
 		for _, p := range parties {
 			if !p.Valid {
-				pending = append(pending, fmt.Sprintf("%s (%s)", p.ProviderID, p.Error))
+				pending = append(pending, fmt.Sprintf("%s (%s)", partyLabel(p), p.Error))
 			}
 		}
 		if len(parties) == 0 {
 			pending = append(pending, "contract has no data providers")
 		}
-		return nil, signatureGateError("waiting on data-provider signatures: " + strings.Join(pending, "; "))
+		return nil, signatureGateError("waiting on provider signatures: " + strings.Join(pending, "; "))
 	}
 
 	log.Printf("[SIGN] Gate passed: %s contract %s signed by all %d data provider(s)", c.Technique, c.ContractID, len(parties))
@@ -316,6 +352,9 @@ func (s *Server) requireSignedContract(ctx context.Context, tc *services.TEECont
 	if err != nil {
 		return err
 	}
+	if err := s.requireTEEEnabled(ctx, c); err != nil {
+		return err
+	}
 	for _, p := range c.Parties.DataProviders {
 		if p.DataURL != "" && p.DataURL == tc.DatasetDetails.ResourceURL {
 			return nil
@@ -324,24 +363,16 @@ func (s *Server) requireSignedContract(ctx context.Context, tc *services.TEECont
 	return signatureGateError("datasetDetails.resourceUrl is not a dataset on the signed contract")
 }
 
-// writeSignatureStatus writes the GET .../signatures response for c.
+// writeSignatureStatus writes the GET .../signatures response for c: only
+// {"signatures": "matching", "tee": "can run"} or the not-matching /
+// "cannot run" pair.
 func (s *Server) writeSignatureStatus(w http.ResponseWriter, r *http.Request, c *contract.Contract) {
-	parties, hashOK, allValid := s.verifyContractSignatures(reqCtx(r), c)
-	if parties == nil {
-		parties = []partySignatureStatus{}
+	_, _, allValid := s.verifyContractSignatures(reqCtx(r), c)
+	if allValid && signable(c) {
+		writeJSON(w, http.StatusOK, j{"signatures": "matching", "tee": "can run"})
+		return
 	}
-	writeJSON(w, http.StatusOK, j{
-		"status":           "SUCCESS",
-		"contract_id":      c.ContractID,
-		"contract_hash":    c.ContractHash,
-		"technique":        c.Technique,
-		"version":          c.Version,
-		"signable":         signable(c),
-		"hash_valid":       hashOK,
-		"governance_valid": s.governanceSignatureValid(c, c.ContractHash),
-		"all_signed":       allValid && signable(c),
-		"parties":          parties,
-	})
+	writeJSON(w, http.StatusOK, j{"signatures": "not matching", "tee": "cannot run"})
 }
 
 // GET /contracts/{contractId}/signatures — each data provider's signing
@@ -383,12 +414,38 @@ func (s *Server) getSessionContractSignatures(w http.ResponseWriter, r *http.Req
 }
 
 // POST /contracts/{contractId}/sign — a data provider returns their
-// signature over the contract hash. Called by p3dx-aaa, which authenticates
-// the provider and passes their Keycloak username. gov_layer checks that the
-// username maps to the party's provider_id, re-hashes its own stored copy of
-// the contract, and verifies the signature with the public key Keycloak has
-// on record for that user.
+// signature over the contract hash, with their own access token as the
+// Bearer token (p3dx-aaa forwards it; a provider can also call directly).
+// The signer's username comes from that token. gov_layer checks that it maps
+// to the party's provider_id, re-hashes its own stored copy of the contract,
+// and verifies the signature with the public key registered for that user
+// (PUT /provider-keys/{role}).
+//
+// The reply is only {"status": "signed", "message": "sent to governance
+// layer"}, or {"status": "not signed", "message": <reason>} with the error's
+// HTTP status.
 func (s *Server) handleSignContract(w http.ResponseWriter, r *http.Request) {
+	rec := httptest.NewRecorder()
+	s.signContract(rec, r)
+	if rec.Code == http.StatusOK {
+		writeJSON(w, http.StatusOK, j{"status": "signed", "message": "sent to governance layer"})
+		return
+	}
+	var failed struct{ Error, Message string }
+	_ = json.Unmarshal(rec.Body.Bytes(), &failed)
+	msg := failed.Message
+	if msg == "" {
+		msg = failed.Error
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(rec.Body.String())
+	}
+	writeJSON(w, rec.Code, j{"status": "not signed", "message": msg})
+}
+
+// signContract does the signing behind handleSignContract, writing the
+// detailed result it translates.
+func (s *Server) signContract(w http.ResponseWriter, r *http.Request) {
 	contractID := chi.URLParam(r, "contractId")
 	var body struct {
 		ProviderUsername string `json:"provider_username"`
@@ -396,13 +453,27 @@ func (s *Server) handleSignContract(w http.ResponseWriter, r *http.Request) {
 		ContractHash     string `json:"contract_hash"`
 		Signature        string `json:"signature"`
 	}
+	// The signer is whoever the provider's own access token says — never the
+	// body. provider_username, if sent (p3dx-aaa does), must agree with it.
+	signer, ok := s.providerTokenIdentity(w, r)
+	if !ok {
+		return
+	}
 	if !s.readBody(w, r, &body) {
 		return
 	}
-	if body.ProviderUsername == "" || body.ContractHash == "" || body.Signature == "" {
+	if body.ProviderUsername != "" && !strings.EqualFold(body.ProviderUsername, signer.username) {
+		writeJSON(w, http.StatusForbidden, j{
+			"status": "FAILED", "error": "SIGNER_MISMATCH",
+			"message": "provider_username does not match the token's user",
+		})
+		return
+	}
+	body.ProviderUsername = signer.username
+	if body.ContractHash == "" || body.Signature == "" {
 		writeJSON(w, http.StatusBadRequest, j{
 			"status": "FAILED", "error": "MISSING_FIELDS",
-			"message": "provider_username, contract_hash and signature are required",
+			"message": "contract_hash and signature are required",
 		})
 		return
 	}
@@ -427,6 +498,18 @@ func (s *Server) handleSignContract(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, j{
 			"status": "FAILED", "error": "CONTRACT_NOT_SIGNABLE",
 			"message": "only the final roster contract is signed",
+		})
+		return
+	}
+	// Job approval comes before signing (job_approval.go).
+	if allowed, err := s.signingAllowed(reqCtx(r), c); err != nil {
+		log.Println("[SIGN] Error checking job approval:", err)
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR"})
+		return
+	} else if !allowed {
+		writeJSON(w, http.StatusConflict, j{
+			"status": "FAILED", "error": "JOB_NOT_APPROVED",
+			"message": "this contract's job is not approved yet — every data and infra provider must pass the role and catalogue checks before it can be signed",
 		})
 		return
 	}
@@ -469,7 +552,7 @@ func (s *Server) handleSignContract(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("[SIGN] Public key lookup failed for %s: %v", body.ProviderUsername, err)
 		code, status := "PUBLIC_KEY_LOOKUP_FAILED", http.StatusBadGateway
-		if errors.Is(err, userdir.ErrNoPublicKey) || errors.Is(err, userdir.ErrUserNotFound) {
+		if errors.Is(err, db.ErrNoPublicKey) {
 			code, status = "NO_PUBLIC_KEY", http.StatusBadRequest
 		}
 		writeJSON(w, status, j{"status": "FAILED", "error": code, "message": err.Error()})

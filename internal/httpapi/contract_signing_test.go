@@ -19,7 +19,7 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/userdir"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
 
 type stubKeys map[string]string
@@ -28,7 +28,7 @@ func (k stubKeys) PublicKey(_ context.Context, username string) (string, error) 
 	if pub, ok := k[username]; ok {
 		return pub, nil
 	}
-	return "", userdir.ErrUserNotFound
+	return "", db.ErrNoPublicKey
 }
 
 func newRSAKey(t *testing.T) (*rsa.PrivateKey, string) {

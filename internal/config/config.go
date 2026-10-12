@@ -76,6 +76,9 @@ type Config struct {
 	// --- participant-VM IP registry (httpapi/vm_registry.go) ---
 	VMRegistryToken string // VM_REGISTRY_TOKEN — shared secret terraform/participant-vm sends on vm-registry calls; empty disables the check
 
+	// --- provider public keys (httpapi/provider_keys.go) ---
+	ProviderKeyJWKSURL string // PROVIDER_KEY_JWKS_URL — JWKS of the Keycloak providers log in through; validates the token p3dx-aaa forwards on /provider-keys
+
 	// --- TEE orchestrator (httpapi/tee_orchestrator.go) ---
 	// The confidential VM is pre-provisioned; the orchestrator starts and stops
 	// it rather than creating it. TEEEnclaveBaseURL overrides the URL built from
@@ -120,6 +123,29 @@ type Config struct {
 	UserKeycloakRealm         string // USER_KEYCLOAK_REALM (default "master")
 	UserKeycloakAdminUser     string // USER_KEYCLOAK_ADMIN_USER
 	UserKeycloakAdminPassword string // USER_KEYCLOAK_ADMIN_PASSWORD
+	// Service-account alternative to the admin user (client_credentials
+	// grant), used instead of it when both are set — e.g. against the dev
+	// Keycloak. The client's service account needs realm-management's
+	// view-users role.
+	UserKeycloakClientID     string // USER_KEYCLOAK_CLIENT_ID
+	UserKeycloakClientSecret string // USER_KEYCLOAK_CLIENT_SECRET
+	// Realm role the job-approval data-provider check looks for. The dev
+	// Keycloak calls it "provider".
+	DataProviderRole string // DATA_PROVIDER_ROLE (default "data-provider")
+
+	// --- DX catalogue (job-approval data-provider check, job_approval.go) ---
+	// POST /job/approval/data-provider carries the data provider's own dev
+	// Keycloak token; it is validated against DataProviderJWKSURL and then
+	// used to look each of their datasets up in the DX catalogue.
+	CatalogueBaseURL    string        // CATALOGUE_BASE_URL (default https://v2.dev.iudx.io/controlplane/iudx/v2/cat)
+	CatalogueTimeout    time.Duration // CATALOGUE_TIMEOUT_MS (default 10000)
+	DataProviderJWKSURL string        // DATA_PROVIDER_JWKS_URL (default: USER_KEYCLOAK_BASE_URL/REALM's certs)
+
+	// RequireInfraApproval: a job is approved only once both its data-provider
+	// and infra-provider approvals are accepted. Set REQUIRE_INFRA_APPROVAL=false
+	// to approve on the data-provider side alone (temporary, while infra
+	// providers aren't set up in dev).
+	RequireInfraApproval bool // REQUIRE_INFRA_APPROVAL (default true)
 
 	// --- ad-hoc VM provisioning (httpapi/vm_provision.go) ---
 	// Unlike the TEE flow above, this creates a brand-new VM per request
@@ -198,6 +224,8 @@ func Load() *Config {
 
 		VMRegistryToken: os.Getenv("VM_REGISTRY_TOKEN"),
 
+		ProviderKeyJWKSURL: getEnv("PROVIDER_KEY_JWKS_URL", "http://localhost:8080/realms/master/protocol/openid-connect/certs"),
+
 		TEEAzureRG:        os.Getenv("TEE_AZURE_RG"),
 		TEEVMName:         os.Getenv("TEE_VM_NAME"),
 		TEEVMIP:           os.Getenv("TEE_VM_IP"),
@@ -221,7 +249,17 @@ func Load() *Config {
 		UserKeycloakRealm:         getEnv("USER_KEYCLOAK_REALM", "master"),
 		UserKeycloakAdminUser:     os.Getenv("USER_KEYCLOAK_ADMIN_USER"),
 		UserKeycloakAdminPassword: os.Getenv("USER_KEYCLOAK_ADMIN_PASSWORD"),
+		UserKeycloakClientID:      os.Getenv("USER_KEYCLOAK_CLIENT_ID"),
+		UserKeycloakClientSecret:  os.Getenv("USER_KEYCLOAK_CLIENT_SECRET"),
+		DataProviderRole:          getEnv("DATA_PROVIDER_ROLE", "data-provider"),
+
+		CatalogueBaseURL: strings.TrimRight(getEnv("CATALOGUE_BASE_URL", "https://v2.dev.iudx.io/controlplane/iudx/v2/cat"), "/"),
+		CatalogueTimeout: getEnvMS("CATALOGUE_TIMEOUT_MS", 10000),
+
+		RequireInfraApproval: getEnvBool("REQUIRE_INFRA_APPROVAL", true),
 	}
+	c.DataProviderJWKSURL = getEnv("DATA_PROVIDER_JWKS_URL",
+		strings.TrimRight(c.UserKeycloakBaseURL, "/")+"/realms/"+c.UserKeycloakRealm+"/protocol/openid-connect/certs")
 	return c
 }
 
