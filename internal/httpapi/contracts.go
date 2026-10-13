@@ -37,7 +37,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// thsi will build the contract  and
-	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL", s.cfg.KBSURL)
+	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL", s.cfg.KBSURL, s.cfg.FLContractValidity)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, j{

@@ -143,6 +143,9 @@ func (s *Server) devTokenClaims(w http.ResponseWriter, r *http.Request, whose st
 		return "", nil, false
 	}
 	claims, _ := token.Claims.(jwt.MapClaims)
+	if s.rejectFlotillaVMToken(w, claims) {
+		return "", nil, false
+	}
 	return tokenStr, claims, true
 }
 

@@ -254,6 +254,23 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// One row per Flotilla gateway TLS certificate issued by the
+		// governance CA (POST /gateway-certs): which FL contract it was issued
+		// for, to whom (requested_by = the orchestrator token's azp), and when
+		// it expires (the contract's valid_until). See internal/db/gateway_certs.go.
+		`CREATE TABLE IF NOT EXISTS gateway_certs (
+			serial TEXT PRIMARY KEY,
+			submission_id TEXT NOT NULL,
+			project_id TEXT,
+			contract_id TEXT,
+			job_id TEXT,
+			server_ip TEXT,
+			fingerprint_sha256 TEXT NOT NULL,
+			not_after TIMESTAMP NOT NULL,
+			requested_by TEXT,
+			issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS gateway_certs_submission_id_idx ON gateway_certs(submission_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -266,6 +283,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table contracts ready")
 	log.Println("[DATABASE] Table vm_registry ready")
 	log.Println("[DATABASE] Table provider_public_keys ready")
+	log.Println("[DATABASE] Table gateway_certs ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }

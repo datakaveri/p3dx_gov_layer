@@ -9,6 +9,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -45,20 +46,30 @@ type Server struct {
 	// govKey is gov_layer's own key pair; it signs each contract hash before
 	// the hash goes out to data providers (contract_signing.go).
 	govKey *services.GovernanceKey
+	// govCA is govKey's self-signed CA certificate (and govCAPEM its PEM);
+	// it signs Flotilla gateway TLS certificates (gateway_certs.go).
+	govCA    *x509.Certificate
+	govCAPEM []byte
+	// gatewayStore loads FL contracts and records issued gateway
+	// certificates — *db.DB in production; stubbed in tests.
+	gatewayStore gatewayCertStore
 }
 
 // New builds the Server.
-func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *services.GovernanceKey) *Server {
+func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *services.GovernanceKey, govCA *x509.Certificate, govCAPEM []byte) *Server {
 	return &Server{
 		cfg: cfg,
 		db:  database,
 		kc:  kc,
 		// No client-level timeout: each outbound call sets its own via context.
-		http:        &http.Client{},
-		tees:        newTEERegistry(),
-		teeSessions: newTEESessionRegistry(),
-		publicKeys:  dbPublicKeys{database},
-		govKey:      govKey,
+		http:         &http.Client{},
+		tees:         newTEERegistry(),
+		teeSessions:  newTEESessionRegistry(),
+		publicKeys:   dbPublicKeys{database},
+		govKey:       govKey,
+		govCA:        govCA,
+		govCAPEM:     govCAPEM,
+		gatewayStore: database,
 	}
 }
 
@@ -132,6 +143,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/job/approval/data-provider", s.handleDataProviderApproval)
 	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
 	r.Put("/job/{jobId}/status", s.putJobStatus)
+
+	// Flotilla join gateway (gateway_certs.go): the FL orchestrator's service
+	// account requests a TLS server certificate for an FL session's gateway,
+	// signed by the governance CA; FL clients fetch the CA certificate
+	// (unauthenticated) to trust it.
+	r.Post("/gateway-certs", s.postGatewayCert)
+	r.Get("/governance/ca-cert", s.getGovernanceCACert)
 	r.Post("/job/{jobId}/tee", s.enableJobTEE)
 	//for the model.go
 	r.Get("/final-models", s.getFinalModels)

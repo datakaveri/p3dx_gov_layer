@@ -10,6 +10,8 @@ node_modules/
 
 # Governance contract-signing key pair (generated on first start)
 keys/governance_signing_key.pem
+# Governance CA certificate (public, but regenerated per deployment)
+keys/governance_ca.pem
 
 # Test data-provider key pairs made by scripts/contract-sign.sh keygen
 keys/providers/
