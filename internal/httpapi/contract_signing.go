@@ -106,6 +106,14 @@ func (s *Server) governanceSign(c *contract.Contract) error {
 	return nil
 }
 
+// governanceSignatureOK reports whether c's governance signature over hash is
+// in order: required and valid, except on a job-approval contract
+// (needsJobApproval), which carries none — its providers' signatures over the
+// contract_hash stored at /generate-contract are what make it final.
+func (s *Server) governanceSignatureOK(c *contract.Contract, hash string) bool {
+	return needsJobApproval(c) || s.governanceSignatureValid(c, hash)
+}
+
 // governanceSignatureValid reports whether c carries a governance signature
 // over its current hash that verifies against gov_layer's public key.
 func (s *Server) governanceSignatureValid(c *contract.Contract, hash string) bool {
@@ -203,14 +211,15 @@ type partySignatureStatus struct {
 }
 
 // verifyContractSignatures re-checks every signature on c: the contract hash
-// must still match its content, the governance signature must verify, and so
-// must every provider's (providerSignatures). allValid is true only when all
+// must still match its content, the governance signature must verify (not on
+// a job-approval contract, governanceSignatureOK), and so must every
+// provider's (providerSignatures). allValid is true only when all
 // do and there is at least one data provider.
 func (s *Server) verifyContractSignatures(ctx context.Context, c *contract.Contract) (parties []partySignatureStatus, hashOK, allValid bool) {
 	hash, err := contract.ComputeHash(*c)
 	hashOK = err == nil && hash == c.ContractHash
 	parties, allValid = s.providerSignatures(ctx, c, hash, hashOK, nil)
-	allValid = allValid && hashOK && s.governanceSignatureValid(c, hash) && len(c.Parties.DataProviders) > 0
+	allValid = allValid && hashOK && s.governanceSignatureOK(c, hash) && len(c.Parties.DataProviders) > 0
 	return parties, hashOK, allValid
 }
 
@@ -298,8 +307,8 @@ func signatureGateError(msg string) error {
 }
 
 // requireAllProvidersSigned is the technique-neutral run gate: contractID
-// must name a stored, signable contract whose governance signature and every
-// data-provider signature verify. Returns the contract on success.
+// must name a stored, signable contract whose governance signature (none on
+// a job-approval contract) and every data-provider signature verify. Returns the contract on success.
 func (s *Server) requireAllProvidersSigned(ctx context.Context, contractID string) (*contract.Contract, error) {
 	if contractID == "" {
 		return nil, signatureGateError("a contract id is required: runs only start for a contract signed by every data provider")
@@ -322,7 +331,7 @@ func (s *Server) requireAllProvidersSigned(ctx context.Context, contractID strin
 	if !hashOK {
 		return nil, signatureGateError("stored contract no longer matches its hash")
 	}
-	if !s.governanceSignatureValid(c, c.ContractHash) {
+	if !s.governanceSignatureOK(c, c.ContractHash) {
 		return nil, signatureGateError("contract has no valid governance signature — regenerate it")
 	}
 	if !allValid {

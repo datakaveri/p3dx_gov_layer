@@ -87,7 +87,8 @@ func TestApprovalReasons(t *testing.T) {
 }
 
 // On a job-approval contract the infra provider's signature (made when
-// approving) is required alongside the data providers'.
+// approving) is required alongside the data providers', and no governance
+// signature is.
 func TestVerifyContractSignaturesWithInfra(t *testing.T) {
 	alice, alicePub := newRSAKey(t)
 	ivan, ivanPub := newRSAKey(t)
@@ -98,9 +99,6 @@ func TestVerifyContractSignaturesWithInfra(t *testing.T) {
 	c := approvalContract()
 	hash, _ := contract.ComputeHash(*c)
 	c.ContractHash = hash
-	if err := srv.governanceSign(c); err != nil {
-		t.Fatal(err)
-	}
 	sig := func(signer string, value string) contract.Signature {
 		return contract.Signature{Signer: signer, SignedHash: hash, Value: value}
 	}
@@ -131,7 +129,8 @@ func TestVerifyContractSignaturesWithInfra(t *testing.T) {
 }
 
 // An approved job whose signatures don't all verify yet isn't made final;
-// finalizeJob says what's pending (and never touches the DB).
+// finalizeJob says what's pending (and never touches the DB). A missing
+// governance signature isn't among it: job contracts carry none.
 func TestFinalizeJobPending(t *testing.T) {
 	alice, alicePub := newRSAKey(t)
 	srv := newTestServer(&config.Config{RequireInfraApproval: true})
@@ -139,23 +138,16 @@ func TestFinalizeJobPending(t *testing.T) {
 
 	c := approvalContract()
 	hash, _ := contract.ComputeHash(*c)
+	c.ContractHash = hash
 	c.Parties.DataProviders[0].Signature = contract.Signature{Signer: "alice", SignedHash: hash, Value: signWith(t, alice, hash)}
 
-	// Not governance-signed yet, infra unsigned.
+	// Infra unsigned; no governance signature, and none needed.
 	final, pending, err := srv.finalizeJob(context.Background(), "job-1", c)
 	if err != nil || final {
 		t.Fatalf("final=%v err=%v, want not final", final, err)
 	}
-	want := map[string]bool{"governance signature missing or invalid": false, "infra infra-1: not signed yet": false}
-	for _, p := range pending {
-		if _, ok := want[p]; ok {
-			want[p] = true
-		}
-	}
-	for p, seen := range want {
-		if !seen {
-			t.Errorf("pending = %q, missing %q", pending, p)
-		}
+	if len(pending) != 1 || pending[0] != "infra infra-1: not signed yet" {
+		t.Errorf("pending = %q, want only the infra signature", pending)
 	}
 }
 
@@ -207,6 +199,45 @@ func TestVerifySubmittedSignature(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A job's contract carries the contract_hash stored at /generate-contract;
+// verification uses it, and refuses a contract edited since.
+func TestJobContractHash(t *testing.T) {
+	c := approvalContract()
+	fresh, err := contract.ComputeHash(*c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stored before the hash was kept with the contract: the fresh hash.
+	if got, err := jobContractHash(c); err != nil || got != fresh {
+		t.Fatalf("no stored hash: got %q, %v; want %q", got, err, fresh)
+	}
+
+	c.ContractHash = fresh
+	if got, err := jobContractHash(c); err != nil || got != fresh {
+		t.Fatalf("stored hash: got %q, %v; want %q", got, err, fresh)
+	}
+
+	// Signatures don't count towards the hash.
+	c.Parties.DataProviders[0].Signature = contract.Signature{Signer: "alice@example.com", SignedHash: fresh, Value: "sig"}
+	if got, err := jobContractHash(c); err != nil || got != fresh {
+		t.Fatalf("after signing: got %q, %v; want %q", got, err, fresh)
+	}
+
+	// The stored contract edited after its hash was stored.
+	c.Parties.DataProviders[0].DataURL = "https://elsewhere"
+	if _, err := jobContractHash(c); err == nil || !strings.Contains(err.Error(), "no longer matches its stored contract_hash") {
+		t.Fatalf("edited contract: err = %v, want a mismatch", err)
+	}
+	srv := newTestServer(&config.Config{})
+	if err := srv.verifySubmittedSignature(context.Background(), c, providerCaller{username: "alice@example.com"}, approvalBody{ContractHash: fresh}); err == nil {
+		t.Fatal("verifySubmittedSignature accepted an edited contract")
+	}
+	if _, reasons := srv.verifyJobSignatures(context.Background(), c); len(reasons) != 1 || !strings.Contains(reasons[0], "no longer matches") {
+		t.Fatalf("verifyJobSignatures reasons = %q, want the mismatch", reasons)
 	}
 }
 

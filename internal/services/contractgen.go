@@ -55,6 +55,7 @@ type GenerateContractInput struct {
 	ConsumerID    string
 	ConsumerName  string
 	Form          map[string]interface{} // provider form data, if FetchDatasetForm found one
+	KBSURL        string                 // KBS_URL; each dataset's trustee block, when set
 
 	// Infrastructure Catalogue (InfraCat) selection — SMPC only. Exactly two
 	// elements once populated by the caller.
@@ -102,6 +103,7 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 			DatasetVersion: "v1",
 			DataURL:        d.DataURL,
 			Constraints:    contract.Constraints{AccessibilityLevel: accessibilityLevel, RestrictedTo: []string{}},
+			Trustee:        contract.NewTrustee(in.KBSURL, d.DatasetName, d.DatasetID),
 		})
 	}
 	_ = in.Form // data_size_bytes etc. aren't part of this schema; kept for future use

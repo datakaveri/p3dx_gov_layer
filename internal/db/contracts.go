@@ -81,7 +81,7 @@ func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID strin
 // Prior data-provider signatures are still carried forward from the session's
 // most recent contract, since a restart reuses the same accepted roster
 // without redoing invite/accept.
-func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway string) (*contract.Contract, error) {
+func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string) (*contract.Contract, error) {
 	if pathway == "" {
 		pathway = "FL"
 	}
@@ -95,6 +95,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 			DatasetName: p.DatasetName,
 			DataURL:     p.DataURL,
 			Constraints: contract.Constraints{RestrictedTo: []string{}},
+			Trustee:     contract.NewTrustee(kbsURL, p.DatasetName, ""),
 		}
 		if signedAt, ok := priorSignatures[p.Username]; ok {
 			dp.Signature.SignedAt = signedAt

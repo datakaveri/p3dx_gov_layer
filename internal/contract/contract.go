@@ -66,7 +66,34 @@ type DataProviderParty struct {
 	DatasetVersion string      `json:"dataset_version"`
 	DataURL        string      `json:"data_url"`
 	Constraints    Constraints `json:"constraints"`
-	Signature      Signature   `json:"signature"`
+	// Trustee is where the workload fetches this dataset's decryption key.
+	// Nil (and omitted, keeping older contracts' hashes unchanged) when no
+	// KBS is configured.
+	Trustee   *Trustee  `json:"trustee,omitempty"`
+	Signature Signature `json:"signature"`
+}
+
+// Trustee locates a dataset's decryption key in the Key Broker Service.
+type Trustee struct {
+	KBSURL          string `json:"kbs_url"`
+	KeyResourcePath string `json:"key_resource_path"`
+}
+
+// NewTrustee returns the trustee block for one dataset, keyed by
+// default/<datasetName>-key/<datasetID> (datasetName when there is no
+// id), or nil when kbsURL is empty.
+func NewTrustee(kbsURL, datasetName, datasetID string) *Trustee {
+	if kbsURL == "" {
+		return nil
+	}
+	resource := datasetID
+	if resource == "" {
+		resource = datasetName
+	}
+	return &Trustee{
+		KBSURL:          kbsURL,
+		KeyResourcePath: "default/" + datasetName + "-key/" + resource,
+	}
 }
 
 // ApplicationProviderParty is one workload/application contributor.
