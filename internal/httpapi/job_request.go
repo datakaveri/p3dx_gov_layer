@@ -2,9 +2,8 @@
 // (datasets + infra, see job_approval.go), each data and infra provider on it
 // is sent a JOB_REQUEST notification asking them to approve or reject the
 // job with POST /job/approval/{data,infra}-provider. It carries the contract
-// and its hash — the same hash gov_layer governance-signs and sends for
-// signing once the job is approved (sealContract), since the contract isn't
-// changed in between.
+// and its hash — the contract_hash stored with it, which each provider signs
+// when approving and every approval is cross-verified against.
 package httpapi
 
 import (

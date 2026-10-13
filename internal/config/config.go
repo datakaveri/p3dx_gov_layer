@@ -147,6 +147,16 @@ type Config struct {
 	// providers aren't set up in dev).
 	RequireInfraApproval bool // REQUIRE_INFRA_APPROVAL (default true)
 
+	// KBSURL is the Key Broker Service each data provider's contract
+	// "trustee" block points at (contract.NewTrustee). Blank omits the block.
+	KBSURL string // KBS_URL
+
+	// --- IUDX APD policy, posted per accepted dataset at
+	// POST /job/approval/data-provider with the data provider's own token.
+	// Blank IUDXAPDPolicyURL skips it.
+	IUDXAPDPolicyURL      string // IUDX_APD_POLICY_URL
+	IUDXPolicyCallbackURL string // IUDX_POLICY_CALLBACK_URL; "/<job_id>" is appended
+
 	// --- ad-hoc VM provisioning (httpapi/vm_provision.go) ---
 	// Unlike the TEE flow above, this creates a brand-new VM per request
 	// rather than starting a pre-provisioned one.
@@ -257,6 +267,11 @@ func Load() *Config {
 		CatalogueTimeout: getEnvMS("CATALOGUE_TIMEOUT_MS", 10000),
 
 		RequireInfraApproval: getEnvBool("REQUIRE_INFRA_APPROVAL", true),
+
+		KBSURL: strings.TrimRight(os.Getenv("KBS_URL"), "/"),
+
+		IUDXAPDPolicyURL:      os.Getenv("IUDX_APD_POLICY_URL"),
+		IUDXPolicyCallbackURL: os.Getenv("IUDX_POLICY_CALLBACK_URL"),
 	}
 	c.DataProviderJWKSURL = getEnv("DATA_PROVIDER_JWKS_URL",
 		strings.TrimRight(c.UserKeycloakBaseURL, "/")+"/realms/"+c.UserKeycloakRealm+"/protocol/openid-connect/certs")

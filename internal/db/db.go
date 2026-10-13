@@ -230,6 +230,17 @@ func (d *DB) migrate(ctx context.Context) error {
 		// unaffected.
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP`,
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS tee_enabled_at TIMESTAMP`,
+		// A job's final contract (final_contracts.go): the governance-signed
+		// contract, stored once at PUT /job/{jobId}/status after every
+		// approval, the contract hash and every signature verified. Its own
+		// table so it stays as created while the contracts row moves on.
+		`CREATE TABLE IF NOT EXISTS final_contracts (
+			job_id TEXT PRIMARY KEY,
+			contract_id TEXT NOT NULL,
+			contract_hash TEXT NOT NULL,
+			contract JSONB NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		// One RSA public key per provider user (data-provider / infra-provider),
 		// generated in their browser and registered via PUT /provider-keys; the
 		// contract-signing flow verifies their signatures against it. See

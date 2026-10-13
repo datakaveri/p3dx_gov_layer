@@ -204,16 +204,24 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		ConsumerID:    consumerID,
 		ConsumerName:  services.ConsumerDisplayName(claims),
 		Form:          form,
+		KBSURL:        s.cfg.KBSURL,
 
 		Infras: infraInputs,
 	})
 
-	// A contract naming both datasets and infra needs job approval first; it
-	// is hashed and governance-signed only once that job is approved
-	// (sealContract, job_approval.go), so it is stored without either here.
+	// A contract naming both datasets and infra needs job approval first. It
+	// is stored with its contract_hash — the hash its JOB_REQUESTs carry
+	// (storedContractHash), its providers sign when approving and the
+	// approvals are cross-verified against (jobContractHash). It is never
+	// governance-signed.
 	needsApproval := needsJobApproval(&contract)
 	if needsApproval {
 		contract.ContractHash = ""
+		if _, hash, err := storedContractHash(contract); err == nil {
+			contract.ContractHash = hash
+		} else {
+			log.Printf("[GENERATE] Warning: job %s: contract could not be hashed: %v", contract.JobID, err)
+		}
 	} else if req.Technique != "FL" && contract.ContractHash != "" {
 		// Other TEE/SMPC contracts: gov_layer signs the hash with its own key
 		// before storing, so the stored copy carries the governance signature
@@ -273,7 +281,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	case req.Technique == "FL" || !stored:
 	case needsApproval:
 		signing = "on_hold_pending_approval"
-		log.Printf("[GENERATE] Job %s: contract is hashed, governance-signed and sent for signing once its job approval is accepted", contract.JobID)
+		log.Printf("[GENERATE] Job %s: contract hashed and stored; its providers sign the hash when approving", contract.JobID)
 	case contract.GovernanceSignature != nil:
 		signRequestsSent = s.sendSignRequestsOnce(r.Context(), contract, sender)
 		signing = "requested"

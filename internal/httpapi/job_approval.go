@@ -496,6 +496,9 @@ type approvalBody struct {
 	JobID        string `json:"job_id"`
 	ContractHash string `json:"contract_hash"`
 	Signature    string `json:"signature"`
+	// Optional, data provider only: copied into their IUDX policies.
+	ProviderComment    string `json:"provider_comment,omitempty"`
+	FeedbackToConsumer string `json:"feedback_to_consumer,omitempty"`
 }
 
 // loadApprovalJob reads the approval body and loads that job's contract,
@@ -622,17 +625,90 @@ func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Reque
 	// Accepted: the consumer may use the dataset — its APD consumer grant is
 	// posted now (PUT /job/{jobId}/status re-posts it; APD updates in place).
 	resp["grants"] = s.postConsumerGrants(reqCtx(r), db.AuditTypeDataProvider, jobID, c, own)
+	// ...and its IUDX APD policy, with the caller's own token — so only
+	// here, not again at PUT /job/{jobId}/status (the consumer's token).
+	resp["iudx_policies"] = s.postIUDXPolicies(reqCtx(r), jobID, c, own, caller, body)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// verifySubmittedSignature checks the caller's approval signature now: the
-// submitted contract_hash must be gov_layer's own hash of the stored
-// contract, and the signature over it must verify with the caller's
-// registered public key (PUT /provider-keys/{role}).
-func (s *Server) verifySubmittedSignature(ctx context.Context, c *contract.Contract, caller providerCaller, body approvalBody) error {
+// iudxPolicyResult is one dataset's IUDX APD policy in the approval response.
+type iudxPolicyResult struct {
+	ItemID   string `json:"item_id"`
+	PolicyID string `json:"policy_id,omitempty"`
+	Status   string `json:"status"` // "posted" / "failed"
+	Error    string `json:"error,omitempty"`
+}
+
+// postIUDXPolicies posts an IUDX APD policy (IUDX_APD_POLICY_URL, skipped
+// when blank) for each of the caller's accepted datasets, built from the
+// stored contract. A failure is reported, never fails the approval.
+func (s *Server) postIUDXPolicies(ctx context.Context, jobID string, c *contract.Contract, own []db.AuditEntry, caller providerCaller, body approvalBody) []iudxPolicyResult {
+	results := []iudxPolicyResult{}
+	if s.cfg == nil || s.cfg.IUDXAPDPolicyURL == "" {
+		return results
+	}
+	client := s.http
+	if client == nil {
+		client = http.DefaultClient
+	}
+	for _, e := range own {
+		if e.Status != db.AuditStatusAccepted {
+			continue
+		}
+		for _, dp := range c.Parties.DataProviders {
+			if partyProviderID(dp) != e.ProviderID || approvalItem(dp) != e.Item {
+				continue
+			}
+			policy := services.BuildIUDXPolicy(services.IUDXPolicyInput{
+				Contract:           c,
+				JobID:              jobID,
+				Dataset:            dp,
+				ItemID:             e.Item,
+				CallbackURL:        s.cfg.IUDXPolicyCallbackURL,
+				ProviderComment:    body.ProviderComment,
+				FeedbackToConsumer: body.FeedbackToConsumer,
+			})
+			res := iudxPolicyResult{ItemID: e.Item, Status: "posted"}
+			pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			policyID, err := services.PostIUDXPolicy(pctx, client, s.cfg.IUDXAPDPolicyURL, caller.token, policy)
+			cancel()
+			if err != nil {
+				log.Printf("[JOB-APPROVAL] job=%s: IUDX policy for dataset %s not posted: %v", jobID, e.Item, err)
+				res.Status, res.Error = "failed", err.Error()
+			} else {
+				res.PolicyID = policyID
+				log.Printf("[JOB-APPROVAL] job=%s: IUDX policy posted for dataset %s (id=%q)", jobID, e.Item, policyID)
+			}
+			results = append(results, res)
+			break
+		}
+	}
+	return results
+}
+
+// jobContractHash is the contract_hash stored with a job's contract at
+// POST /generate-contract, cross-checked against a fresh hash of the stored
+// contract so an edit made since is refused. Contracts stored before the hash
+// was kept with them have none; their fresh hash stands in.
+func jobContractHash(c *contract.Contract) (string, error) {
 	hash, err := contract.ComputeHash(*c)
 	if err != nil {
-		return fmt.Errorf("contract could not be hashed: %w", err)
+		return "", fmt.Errorf("contract could not be hashed: %w", err)
+	}
+	if c.ContractHash != "" && c.ContractHash != hash {
+		return "", fmt.Errorf("stored contract no longer matches its stored contract_hash %s (now %s)", c.ContractHash, hash)
+	}
+	return hash, nil
+}
+
+// verifySubmittedSignature checks the caller's approval signature now: the
+// submitted contract_hash must be the one stored with the job's contract
+// (jobContractHash), and the signature over it must verify with the caller's
+// registered public key (PUT /provider-keys/{role}).
+func (s *Server) verifySubmittedSignature(ctx context.Context, c *contract.Contract, caller providerCaller, body approvalBody) error {
+	hash, err := jobContractHash(c)
+	if err != nil {
+		return err
 	}
 	if body.ContractHash != hash {
 		return fmt.Errorf("contract_hash %s is not this job's contract hash (%s): sign the contract_hash from your JOB_REQUEST", body.ContractHash, hash)
@@ -810,13 +886,13 @@ func (s *Server) saveJobApproval(ctx context.Context, kind, jobID string, entrie
 	return st, nil
 }
 
-// sealContract hashes a job's contract whose provider signatures all
-// verified, signs the hash with gov_layer's private key and stores that copy.
-// The hash is the one the providers were sent with their job requests and
-// signed when approving. A no-op for a contract that already carries a governance
-// signature (sealed earlier, or one that needed no approval).
+// sealContract stores the contract_hash on a job's contract whose provider
+// signatures all verified — the hash the providers were sent with their job
+// requests and signed when approving. A job contract carries no governance
+// signature. A no-op once the hash is stored (since /generate-contract
+// stores it, only contracts from before then lack it).
 func (s *Server) sealContract(ctx context.Context, c *contract.Contract) error {
-	if c.GovernanceSignature != nil {
+	if c.ContractHash != "" {
 		return nil
 	}
 	hash, err := contract.ComputeHash(*c)
@@ -824,9 +900,6 @@ func (s *Server) sealContract(ctx context.Context, c *contract.Contract) error {
 		return err
 	}
 	c.ContractHash = hash
-	if err := s.governanceSign(c); err != nil {
-		return err
-	}
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return err
@@ -836,7 +909,7 @@ func (s *Server) sealContract(ctx context.Context, c *contract.Contract) error {
 	} else if !ok {
 		return fmt.Errorf("contract %s not found", c.ContractID)
 	}
-	log.Printf("[JOB-APPROVAL] Job %s approved: contract %s hashed (%s) and governance-signed", c.JobID, c.ContractID, hash)
+	log.Printf("[JOB-APPROVAL] Job %s approved: contract %s hash %s stored", c.JobID, c.ContractID, hash)
 	return nil
 }
 
@@ -867,10 +940,12 @@ func (s *Server) recordJobApproval(w http.ResponseWriter, r *http.Request, kind,
 	return resp, true
 }
 
-// finalizeJob makes an approved job's contract final once every signature on
-// it — each data and infra provider's, made when approving, and the
-// governance signature — verifies (verifyContractSignatures); otherwise it
-// returns what's still pending. Marking is idempotent.
+// finalizeJob makes an approved job's contract final once its hash and every
+// signature on it — each data and infra provider's, made when approving —
+// verify (verifyContractSignatures): it creates the
+// job's final contract (final_contracts) and marks the contracts row final.
+// Otherwise it returns what's still pending and creates nothing. Idempotent:
+// a final contract, once created, is never replaced.
 func (s *Server) finalizeJob(ctx context.Context, jobID string, c *contract.Contract) (bool, []string, error) {
 	parties, hashOK, allValid := s.verifyContractSignatures(ctx, c)
 	if !allValid {
@@ -878,7 +953,7 @@ func (s *Server) finalizeJob(ctx context.Context, jobID string, c *contract.Cont
 		if !hashOK {
 			pending = append(pending, "contract no longer matches its hash")
 		}
-		if !s.governanceSignatureValid(c, c.ContractHash) {
+		if !s.governanceSignatureOK(c, c.ContractHash) {
 			pending = append(pending, "governance signature missing or invalid")
 		}
 		for _, p := range parties {
@@ -887,6 +962,17 @@ func (s *Server) finalizeJob(ctx context.Context, jobID string, c *contract.Cont
 			}
 		}
 		return false, pending, nil
+	}
+	raw, err := json.Marshal(c)
+	if err != nil {
+		return false, nil, err
+	}
+	created, err := s.db.CreateFinalContract(ctx, jobID, c.ContractID, c.ContractHash, raw)
+	if err != nil {
+		return false, nil, fmt.Errorf("final contract could not be stored: %w", err)
+	}
+	if created {
+		log.Printf("[JOB-APPROVAL] Job %s: final contract created (contract %s, hash %s)", jobID, c.ContractID, c.ContractHash)
 	}
 	first, err := s.db.MarkJobFinal(ctx, jobID)
 	if err != nil {
@@ -923,12 +1009,15 @@ func jobApprovalResponse(kind, jobID, approval string, st jobApprovalState, entr
 //     of the contract and their signature over it verifies with their
 //     registered public key (verifyJobSignatures).
 //
-// If both hold, the contract is governance-signed (sealContract), the APD
-// consumer grants for every dataset and infra are posted
-// (postConsumerGrants) and the contract is made final (finalizeJob):
-// {"status": "approved", ...}. Otherwise {"status": "not approved",
-// "reasons": [...]}. Re-callable: once approved, it re-verifies and re-posts
-// the grants (APD updates them in place).
+// If both hold, the job's status is approved and only then is its final
+// contract created: with its contract_hash (sealContract) and every provider
+// signature on it verified, it is stored in final_contracts (finalizeJob).
+// No governance signature is added. The APD consumer grants for every dataset and infra are
+// posted after that (postConsumerGrants): {"status": "approved",
+// "final_contract": true, "final_contract_record": {...}, ...}. Otherwise
+// {"status": "not approved", "reasons": [...]} and nothing is created.
+// Re-callable: once approved, it re-verifies, returns the same final
+// contract and re-posts the grants (APD updates them in place).
 func (s *Server) putJobStatus(w http.ResponseWriter, r *http.Request) {
 	_, claims, ok := s.devTokenClaims(w, r, "consumer")
 	if !ok {
@@ -961,11 +1050,26 @@ func (s *Server) putJobStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Approvals, hash and signatures all hold: the job is approved. Only now
+	// is its final contract created.
 	c.JobID = jobID
 	if err := s.sealContract(ctx, c); err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "contract could not be governance-signed: " + err.Error()})
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "contract hash could not be stored: " + err.Error()})
 		return
 	}
+	final, pending, err := s.finalizeJob(ctx, jobID, c)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	var finalRecord *db.FinalContract
+	if final {
+		if finalRecord, err = s.db.GetFinalContract(ctx, jobID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+			return
+		}
+	}
+
 	grants := []grantResult{}
 	for _, kind := range []string{db.AuditTypeDataProvider, db.AuditTypeInfraProvider} {
 		var accepted []db.AuditEntry
@@ -976,17 +1080,13 @@ func (s *Server) putJobStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		grants = append(grants, s.postConsumerGrants(ctx, kind, jobID, c, accepted)...)
 	}
-	final, pending, err := s.finalizeJob(ctx, jobID, c)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
-		return
-	}
 	writeJSON(w, http.StatusOK, j{
 		"status":                 "approved",
 		"contract_hash":          c.ContractHash,
 		"signatures":             parties,
 		"grants":                 grants,
 		"final_contract":         final,
+		"final_contract_record":  finalRecord,
 		"final_contract_pending": pending,
 	})
 }
@@ -1015,9 +1115,9 @@ func approvalReasons(st jobApprovalState) []string {
 // signer must be its owner. Returns each party's result and, if any fails,
 // the reasons.
 func (s *Server) verifyJobSignatures(ctx context.Context, c *contract.Contract) ([]partySignatureStatus, []string) {
-	hash, err := contract.ComputeHash(*c)
+	hash, err := jobContractHash(c)
 	if err != nil {
-		return nil, []string{"contract could not be hashed: " + err.Error()}
+		return nil, []string{err.Error()}
 	}
 	owners := map[string]string{}
 	for _, o := range infraOwners(c) {
