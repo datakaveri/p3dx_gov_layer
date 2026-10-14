@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
 
 // POST /job/{jobId}/tee — Authorization: Bearer <the consumer's dev Keycloak
@@ -51,6 +52,7 @@ func (s *Server) enableJobTEE(w http.ResponseWriter, r *http.Request) {
 			"message": "the job's contract is not final yet: every data and infra provider must approve it, then PUT /job/" + jobID + "/status must return approved"})
 		return
 	}
+	s.markJobParticipants(reqCtx(r), jobID, db.ParticipantStatusTEEEnabled)
 	writeJSON(w, http.StatusOK, j{
 		"status":         "SUCCESS",
 		"job_id":         jobID,

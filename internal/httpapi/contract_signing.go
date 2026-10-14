@@ -600,6 +600,8 @@ func (s *Server) signContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.markSignedParticipant(reqCtx(r), c, providerID, signer.userID, body.ProviderUsername)
+
 	if body.NotificationID != "" {
 		if _, err := s.db.RespondToNotification(reqCtx(r), body.NotificationID, providerID, "accepted", "signed"); err != nil {
 			log.Println("[SIGN] Warning: failed to mark sign request answered:", err)

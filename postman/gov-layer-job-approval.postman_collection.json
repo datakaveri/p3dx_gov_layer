@@ -765,6 +765,153 @@
       ]
     },
     {
+      "name": "Jobs for a user (GET /jobs/user/{userId})",
+      "description": "Which jobs / contracts each user is participating in, from the governance layer's job_participants table. Run any time after the contract is generated; the statuses move as the job is approved, signed, made final and its TEE enabled.",
+      "item": [
+        {
+          "name": "Jobs for the consumer",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// consumer's Keycloak user id = the sub claim of their token",
+                  "const t = pm.collectionVariables.get('access_token') || '';",
+                  "const part = t.split('.')[1] || '';",
+                  "const sub = part ? JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))).sub : '';",
+                  "pm.collectionVariables.set('consumer_user_id', sub);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('consumer ' + d.user_id + ' is on ' + d.count + ' job(s)');",
+                  "(d.jobs || []).forEach(j => console.log(j.job_id, j.contract_id, j.technique, j.job_state, JSON.stringify(j.participation.map(p => p.role + ':' + (p.item_id || '-') + ':' + p.status))));",
+                  "pm.test('this job is listed', () => pm.expect((d.jobs || []).map(j => j.job_id)).to.include(pm.collectionVariables.get('job_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{gov_url}}/jobs/user/{{consumer_user_id}}",
+            "description": "Every job (contract) the consumer takes part in, newest first: job_id, contract_id, technique, job_state (in_progress / final / tee_enabled) and their participation (role, dataset / infra, status: created / requested / approved / rejected / signed / final / tee_enabled). userId is their Keycloak user id (sub, read from their token above); a username, email or provider id also works. Stored in the governance layer's job_participants table."
+          }
+        },
+        {
+          "name": "Jobs for the data provider",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// data provider's Keycloak user id = the sub claim of their token",
+                  "const t = pm.collectionVariables.get('data_provider_token') || '';",
+                  "const part = t.split('.')[1] || '';",
+                  "const sub = part ? JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))).sub : '';",
+                  "pm.collectionVariables.set('data_provider_user_id', sub);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('data provider ' + d.user_id + ' is on ' + d.count + ' job(s)');",
+                  "(d.jobs || []).forEach(j => console.log(j.job_id, j.contract_id, j.technique, j.job_state, JSON.stringify(j.participation.map(p => p.role + ':' + (p.item_id || '-') + ':' + p.status))));",
+                  "pm.test('this job is listed', () => pm.expect((d.jobs || []).map(j => j.job_id)).to.include(pm.collectionVariables.get('job_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{data_provider_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{gov_url}}/jobs/user/{{data_provider_user_id}}",
+            "description": "Every job (contract) the data provider takes part in, newest first: job_id, contract_id, technique, job_state (in_progress / final / tee_enabled) and their participation (role, dataset / infra, status: created / requested / approved / rejected / signed / final / tee_enabled). userId is their Keycloak user id (sub, read from their token above); a username, email or provider id also works. Stored in the governance layer's job_participants table."
+          }
+        },
+        {
+          "name": "Jobs for the infra provider",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// infra provider's Keycloak user id = the sub claim of their token",
+                  "const t = pm.collectionVariables.get('infra_provider_token') || '';",
+                  "const part = t.split('.')[1] || '';",
+                  "const sub = part ? JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))).sub : '';",
+                  "pm.collectionVariables.set('infra_provider_user_id', sub);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "console.log('infra provider ' + d.user_id + ' is on ' + d.count + ' job(s)');",
+                  "(d.jobs || []).forEach(j => console.log(j.job_id, j.contract_id, j.technique, j.job_state, JSON.stringify(j.participation.map(p => p.role + ':' + (p.item_id || '-') + ':' + p.status))));",
+                  "pm.test('this job is listed', () => pm.expect((d.jobs || []).map(j => j.job_id)).to.include(pm.collectionVariables.get('job_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{infra_provider_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{gov_url}}/jobs/user/{{infra_provider_user_id}}",
+            "description": "Every job (contract) the infra provider takes part in, newest first: job_id, contract_id, technique, job_state (in_progress / final / tee_enabled) and their participation (role, dataset / infra, status: created / requested / approved / rejected / signed / final / tee_enabled). userId is their Keycloak user id (sub, read from their token above); a username, email or provider id also works. Stored in the governance layer's job_participants table."
+          }
+        }
+      ]
+    },
+    {
       "name": "Error cases",
       "item": [
         {
@@ -1049,6 +1196,28 @@
               }
             }
           ]
+        },
+        {
+          "name": "Jobs for a user without a token -> 401",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{gov_url}}/jobs/user/anyone"
+          }
         }
       ]
     }
@@ -1189,6 +1358,18 @@
     {
       "key": "existing_job_id",
       "value": "job-1790760844855-c916189ec"
+    },
+    {
+      "key": "consumer_user_id",
+      "value": ""
+    },
+    {
+      "key": "data_provider_user_id",
+      "value": ""
+    },
+    {
+      "key": "infra_provider_user_id",
+      "value": ""
     }
   ],
   "event": [
