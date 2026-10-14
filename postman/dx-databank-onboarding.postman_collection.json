@@ -651,6 +651,52 @@
             },
             "description": "The JOB_REQUEST notification gov_layer sent the infra provider when the job was created (1b): which of their items the user wants, for which job/contract, and the call to approve it with. It also carries the contract and its contract_hash - the same hash gov_layer signs and sends for signing (4a) once the job is approved.\n\n[dummy] Skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
           }
+        },
+        {
+          "name": "1e. Get the job's contract + contract hash",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ok', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test('contract hash returned', () => pm.expect(d.contract_hash).to.match(/^sha256:[0-9a-f]{64}$/));",
+                  "pm.test('contract returned', () => pm.expect(d.contract && d.contract.contract_id).to.eql(pm.variables.get('contract_id')));",
+                  "console.log('job', d.job_id, '| contract', d.contract_id, '| hash', d.contract_hash);",
+                  "pm.collectionVariables.set('contract_hash', d.contract_hash);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gov_url}}/job/{{job_id}}/contract/{{contract_id}}",
+              "host": [
+                "{{gov_url}}"
+              ],
+              "path": [
+                "job",
+                "{{job_id}}",
+                "contract",
+                "{{contract_id}}"
+              ]
+            },
+            "description": "The job's stored contract and its contract_hash, by job_id + contract_id (both saved by 1b). Uses the consumer's token (1a); a data / infra provider's own token on this job works too. Saves contract_hash (the same hash 1c picks up, signed at 2b).\n\n403 NOT_JOB_PARTICIPANT for anyone not on the job; 404 if contract_id is not this job's contract; 409 CONTRACT_HASH_MISMATCH if the stored contract no longer matches its stored hash."
+          }
         }
       ],
       "description": "Creating the job (1b) notifies every data provider and infra provider on it with a JOB_REQUEST: the user is asking to use their dataset / infra. 1c and 1d read those notifications."

@@ -231,3 +231,76 @@ func (s *Server) getUserJobs(w http.ResponseWriter, r *http.Request) {
 	jobs := groupUserJobs(rows)
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "user_id": userID, "count": len(jobs), "jobs": jobs})
 }
+
+// GET /job/{jobId}/contract/{contractId} — Authorization: Bearer <a dev
+// Keycloak token>. The job's stored contract and its contract_hash (the hash
+// stored at POST /generate-contract, re-checked against a fresh hash of the
+// stored contract — jobContractHash). Only the job's consumer or one of its
+// data / infra providers may read it: 403 NOT_JOB_PARTICIPANT otherwise, 404
+// if contractId is not this job's contract.
+func (s *Server) getJobContract(w http.ResponseWriter, r *http.Request) {
+	tokenStr, claims, ok := s.devTokenClaims(w, r, "user")
+	if !ok {
+		return
+	}
+	jobID := strings.TrimSpace(chi.URLParam(r, "jobId"))
+	contractID := strings.TrimSpace(chi.URLParam(r, "contractId"))
+	c, ok := s.loadContractByJob(w, r, jobID)
+	if !ok {
+		return
+	}
+	if contractID == "" || c.ContractID != contractID {
+		writeJSON(w, http.StatusNotFound, j{"status": "FAILED", "error": "NOT_FOUND",
+			"message": "contract_id " + contractID + " is not this job's contract"})
+		return
+	}
+	ctx := reqCtx(r)
+	allowed, err := s.isJobParticipant(ctx, c, callerFromClaims(tokenStr, claims))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	if !allowed {
+		writeJSON(w, http.StatusForbidden, j{"status": "FAILED", "error": "NOT_JOB_PARTICIPANT",
+			"message": "only this job's consumer or its data / infra providers can read its contract"})
+		return
+	}
+	hash, err := jobContractHash(c)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, j{"status": "FAILED", "error": "CONTRACT_HASH_MISMATCH", "message": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "job_id": jobID, "contract_id": c.ContractID,
+		"contract_hash": hash, "contract": c})
+}
+
+// isJobParticipant reports whether caller is c's consumer, one of its data
+// providers, or anyone job_participants lists on c's job (which also covers
+// its infra providers).
+func (s *Server) isJobParticipant(ctx context.Context, c *contract.Contract, caller providerCaller) (bool, error) {
+	if caller.userID != "" && strings.EqualFold(caller.userID, c.Parties.User.ID) {
+		return true, nil
+	}
+	for _, dp := range c.Parties.DataProviders {
+		if caller.is(dp) {
+			return true, nil
+		}
+	}
+	if caller.userID == "" {
+		return false, nil
+	}
+	names, err := s.userJobNames(ctx, caller.userID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := s.db.ListJobParticipantsForUser(ctx, names)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range rows {
+		if p.JobID == c.JobID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
