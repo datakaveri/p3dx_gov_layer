@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "DX DataBank onboarding + job approval flow",
-    "description": "NOTE: the infra-provider flow is a dummy for now (collection variable skip_infra_flow = \"true\"): A2, 1d and 2c are skipped and the infra checks in 3a/3b are off - only the data-provider side is checked. Pairs with REQUIRE_INFRA_APPROVAL=false in p3dx_gov_layer/.env.\n\nEnd-to-end flow: data provider onboards a DataBank in the DX catalogue, consumer creates a job (draft contract) on it, data + infra providers approve it - each approval also posts their APD policy and their signature of the contract hash (keys generated on their own machine) - and the governance layer verifies.\n\nSetup: fill the *_username / *_password variables (or paste full tokens from the dev portal into data_provider_token / infra_provider_token / access_token). Change dataset_name on every run of A1b (catalogue names are unique); A1b saves the new item id into dataset_id.\n\nServices: cp_url = DX Control Plane (dev), gov_url = p3dx_gov_layer (8083), apd_url = p3dx-apd (8082).\n\nNot implemented yet (planned): provider GET inbox of pending jobs, reject, GET job status.",
+    "description": "NOTE: the infra-provider flow is a dummy for now (collection variable skip_infra_flow = \"true\"): A2, 1d and 2c are skipped and the infra checks in 3a are off - only the data-provider side is checked. Pairs with REQUIRE_INFRA_APPROVAL=false in p3dx_gov_layer/.env.\n\nEnd-to-end flow: data provider onboards a DataBank in the DX catalogue, consumer creates a job (draft contract) on it, data + infra providers approve it - each approval also posts their APD policy and their signature of the contract hash (keys generated on their own machine) - and the governance layer verifies and creates the final contract.\n\nSetup: fill the *_username / *_password variables (or paste full tokens from the dev portal into data_provider_token / infra_provider_token / access_token). Change dataset_name on every run of A1b (catalogue names are unique); A1b saves the new item id into dataset_id.\n\nServices: cp_url = DX Control Plane (dev), gov_url = p3dx_gov_layer (8083), apd_url = p3dx-apd (8082).\n\nNot implemented yet (planned): provider GET inbox of pending jobs, reject, GET job status.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -465,7 +465,7 @@
             "method": "POST",
             "header": [],
             "url": "{{keycloak_url}}/realms/{{realm}}/protocol/openid-connect/token",
-            "description": "The user who requests the job. Saves access_token; used for 3b (generate contract) and 5 (job status).",
+            "description": "The user who requests the job. Saves access_token; used for 1b (generate contract), 3a (job status) and 4 (enable TEE).",
             "body": {
               "mode": "urlencoded",
               "urlencoded": [
@@ -517,7 +517,7 @@
               }
             ],
             "url": "{{gov_url}}/generate-contract",
-            "description": "Creates the contract with the dataset + infras and its job_id (saved as job_id / contract_id). It is NOT hashed or signed yet: once the job is approved (step 5), gov_layer hashes it, signs the hash with its own private key and sends it to the data provider (step 6 picks up contract_hash).",
+            "description": "Creates the contract with the dataset + infras and its job_id (saved as job_id / contract_id), and stores it in the governance layer with its contract_hash. Each data and infra provider is sent a JOB_REQUEST carrying that hash (1c/1d); they sign it with their own private key and submit it when approving (2b/2c). At 3a, once every approval and signature verifies, the final contract is created - no governance signature is added.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"datasets\": [\n    {\n      \"dataset_id\": \"{{dataset_id}}\",\n      \"dataset_name\": \"{{dataset_name}}\"\n    }\n  ],\n  \"technique\": \"SMPC\",\n  \"infra_ids\": [\n    \"{{infra_id_1}}\",\n    \"{{infra_id_2}}\"\n  ]\n}",
@@ -731,10 +731,10 @@
               }
             ],
             "url": "{{gov_url}}/job/approval/data-provider",
-            "description": "Approves the caller's datasets (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c/1d). The signature is stored as submitted; the governance layer cross-verifies it in step 3.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{data_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into data_provider_signature.",
+            "description": "Approves the caller's datasets (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c). The signature is verified at once (it must be over the contract_hash stored with the contract, and verify with the registered public key) and stored on the contract; then, per accepted dataset, the consumer grant is posted to the local p3dx-apd (grants) and the IUDX APD policy to IUDX_APD_POLICY_URL with this token (iudx_policies). The policy is built from the stored contract (consumer, expiry, workload, trustee, callbackUrl); provider_comment / feedback_to_consumer are optional and copied into it. An IUDX failure doesn't fail the approval - it is reported in iudx_policies.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{data_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into data_provider_signature.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{data_provider_signature}}\"\n}",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{data_provider_signature}}\",\n  \"provider_comment\": \"{{provider_comment}}\",\n  \"feedback_to_consumer\": \"{{feedback_to_consumer}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -768,6 +768,8 @@
                   "pm.test('signature verified against the registered public key', () => pm.expect(d.signature && d.signature.verified).to.eql(true));",
                   "(d.grants || []).forEach(g => console.log('  APD policy', g.item_type, g.item_id, g.status, g.policy_id || '', g.error || ''));",
                   "pm.test('APD policy posted: consumer may use the dataset', () => pm.expect((d.grants || []).some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
+                  "(d.iudx_policies || []).forEach(p => console.log('  IUDX policy', p.item_id, p.status, p.policy_id || '', p.error || ''));",
+                  "pm.test('IUDX APD policy posted for the dataset', () => pm.expect((d.iudx_policies || []).some(p => p.status === 'posted')).to.eql(true));",
                   "pm.test('job approved', () => pm.expect(d.job_approval).to.eql('accepted'));",
                   "if (d.error === 'INVALID_SIGNATURE') console.log('signature rejected:', d.message);"
                 ]
@@ -838,13 +840,13 @@
           ]
         }
       ],
-      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. Nothing is verified or posted to APD yet - that happens in step 3.\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
+      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. The data provider's signature is verified at once against the contract_hash stored with the contract at 1b and their registered public key - a bad one is refused and nothing is recorded. On acceptance 2b also posts, for each of their datasets, the consumer grant to the local p3dx-apd and the IUDX APD policy (IUDX_APD_POLICY_URL, with the data provider's own token). Step 3 cross-verifies every signature again before the job is approved.\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
     },
     {
-      "name": "3. Governance layer cross-verifies the job (consumer)",
+      "name": "3. Cross-verify signatures + job status (consumer)",
       "item": [
         {
-          "name": "3a. Job status - cross-verify (PUT /job/{job_id}/status)",
+          "name": "3a. Cross-verify signatures + job status (PUT /job/{job_id}/status)",
           "request": {
             "method": "PUT",
             "header": [
@@ -874,7 +876,7 @@
                 "status"
               ]
             },
-            "description": "The governance layer cross-verifies the job: every data and infra provider has approved, and each one's submitted contract_hash is its own hash of the contract and their signature verifies with their registered public key. If all hold it governance-signs the contract, posts the APD policy for every dataset and infra (this user may use it for this job_id + contract_id) and makes the contract final -> {status: approved}. Otherwise {status: not approved, reasons: [...]}.",
+            "description": "1. Every data and infra provider has approved. 2. Each provider's signed contract_hash equals the contract_hash stored with the contract at 1b (itself re-checked against a fresh hash of the stored contract), and their signature verifies with their registered public key. 3. If all hold: the job is approved and its final contract is created in final_contracts (no governance signature), then the APD grant is posted for every dataset and infra (this user may use it for this job_id + contract_id) -> {status: approved, signatures, final_contract: true, final_contract_record}. Otherwise {status: not approved, reasons: [...]}.",
             "body": {
               "mode": "raw",
               "raw": "",
@@ -901,7 +903,15 @@
                   "if (d.status === 'approved') {",
                   "  pm.test('APD policy posted for the dataset', () => pm.expect(d.grants.some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
                   "  if (pm.variables.get('skip_infra_flow') !== 'true') pm.test('APD policy posted for the infra', () => pm.expect(d.grants.some(g => g.item_type === 'infra' && g.status === 'posted')).to.eql(true));",
-                  "  pm.test('contract is final', () => pm.expect(d.final_contract).to.eql(true));",
+                  "  pm.test('every provider signature verified', () => pm.expect((d.signatures || []).length > 0 && d.signatures.every(p => p.valid)).to.eql(true));",
+                  "  (d.final_contract_pending || []).forEach(p => console.log('  final contract pending:', p));",
+                  "  pm.test('all provider signatures verified, contract final - TEE can run', () => pm.expect(d.final_contract).to.eql(true));",
+                  "  const fc = d.final_contract_record;",
+                  "  if (fc) console.log('final contract created', fc.created_at, '| contract', fc.contract_id, '| hash', fc.contract_hash);",
+                  "  pm.test('final contract created for this job', () => {",
+                  "    pm.expect(fc && fc.job_id).to.eql(pm.variables.get('job_id'));",
+                  "    pm.expect(fc.contract_hash).to.eql(d.contract_hash);",
+                  "  });",
                   "} else {",
                   "  pm.execution.setNextRequest(null);",
                   "}"
@@ -909,84 +919,16 @@
               }
             }
           ]
-        },
-        {
-          "name": "3b. Check the APD policies for this job (dataset + infra)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('ok', () => pm.response.to.have.status(200));",
-                  "const grants = pm.response.json().data || [];",
-                  "grants.forEach(g => console.log(g.rules.item_type, g.itemId, '| owner', g.provider_id, '| user', g.rules.consumer, '| job', g.rules.job_id, '| contract', g.rules.contract_id, '| expires', g.expiresAt || 'never'));",
-                  "pm.test('dataset policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'dataset')).to.eql(true));",
-                  "if (pm.variables.get('skip_infra_flow') !== 'true') pm.test('infra policy in APD', () => pm.expect(grants.some(g => g.rules.item_type === 'infra')).to.eql(true));",
-                  "pm.test('all for this job', () => grants.forEach(g => pm.expect(g.rules.job_id).to.eql(pm.variables.get('job_id'))));"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{apd_url}}/policy/grants?job_id={{job_id}}",
-              "host": [
-                "{{apd_url}}"
-              ],
-              "path": [
-                "policy",
-                "grants"
-              ],
-              "query": [
-                {
-                  "key": "job_id",
-                  "value": "{{job_id}}"
-                }
-              ]
-            },
-            "description": "GET /api/v1/policy/grants?job_id= on p3dx-apd: the consumer grants gov_layer posted when data providers approved this job."
-          }
         }
       ],
-      "description": "Step 3a is where the signatures are cross-verified; on approval the APD policies are posted and the contract becomes final. 3b reads the policies back from APD."
+      "description": "One call, 3a. In order: every provider has approved; the contract_hash stored at 1b still matches the stored contract; every provider signature is over that hash and verifies with their registered public key. Only when all hold is the job approved and its final contract created: stored once in final_contracts (returned as final_contract_record). No governance signature is added - the providers' signatures over the stored hash are what make it final. If any check fails, nothing is created. The APD grants are posted after that."
     },
     {
-      "name": "4. Verify all signatures (data + infra providers + governance)",
-      "item": [
-        {
-          "name": "4. Verify the signatures (cross-verify)",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": "{{gov_url}}/contracts/{{contract_id}}/signatures",
-            "description": "gov_layer cross-verifies the hash against its copy of the contract, its own signature, and every data provider's signature against their registered key. Answers only {\"signatures\": \"matching\", \"tee\": \"can run\"} or {\"signatures\": \"not matching\", \"tee\": \"cannot run\"}."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('ok', () => pm.response.to.have.status(200));",
-                  "const d = pm.response.json();",
-                  "console.log('signatures:', d.signatures, '| TEE:', d.tee);",
-                  "pm.test('signatures matching - TEE can run', () => pm.expect(d.tee).to.eql('can run'));"
-                ]
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "name": "5. Enable the TEE (consumer)",
+      "name": "4. Enable the TEE (consumer)",
       "description": "Once the contract is final, the user who created the job enables the TEE run. This only marks it enabled - no VM is started; the run itself is POST /v1/tee/sessions with governanceContractId = contract_id, which is refused until this step is done.",
       "item": [
         {
-          "name": "5. Enable the TEE - POST /job/{job_id}/tee",
+          "name": "4. Enable the TEE - POST /job/{job_id}/tee",
           "event": [
             {
               "listen": "test",
@@ -1029,6 +971,85 @@
           }
         }
       ]
+    },
+    {
+      "name": "5. Start the TEE (consumer)",
+      "description": "Starts the actual TEE run for the job's final contract, after step 4 has enabled it. Runs in the background on gov_layer: start the p3dx-anon-tee VM -> attest -> run -> poll -> fetch output. Returns 202 with a sessionId at once; follow it with GET {{gov_root}}/v1/tee/sessions/{{tee_session_id}}.",
+      "item": [
+        {
+          "name": "5. Start the TEE - POST /v1/tee/sessions",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// consumerId = the consumer's Keycloak sub (the contract's parties.user.id), from access_token (1a).",
+                  "try {",
+                  "  const payload = JSON.parse(atob(pm.collectionVariables.get('access_token').split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+                  "  pm.collectionVariables.set('consumer_id', payload.sub);",
+                  "} catch (e) { console.log('could not read sub from access_token:', e.message); }",
+                  "const now = new Date();",
+                  "pm.collectionVariables.set('tee_issued_at', now.toISOString());",
+                  "pm.collectionVariables.set('tee_expires_at', new Date(now.getTime() + 60 * 60 * 1000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('TEE session started', () => pm.response.to.have.status(202));",
+                  "const d = pm.response.json();",
+                  "console.log(d.status, '|', d.sessionId || d.error, '|', d.message || '');",
+                  "if (d.sessionId) pm.collectionVariables.set('tee_session_id', d.sessionId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{access_token}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contractId\": \"{{contract_id}}\",\n  \"governanceContractId\": \"{{contract_id}}\",\n  \"requestId\": \"{{job_id}}\",\n  \"consumerId\": \"{{consumer_id}}\",\n  \"providerId\": \"{{data_provider_id}}\",\n  \"appDetails\": {\n    \"imageId\": \"{{tee_image_id}}\",\n    \"imageHash\": \"{{tee_image_hash}}\",\n    \"version\": \"1.0\",\n    \"entryPoint\": \"\"\n  },\n  \"datasetDetails\": {\n    \"itemId\": \"{{dataset_id}}\",\n    \"assetName\": \"{{dataset_name}}\",\n    \"assetType\": \"DataBank\",\n    \"resourceUrl\": \"{{tee_resource_url}}\"\n  },\n  \"accessConfig\": {\n    \"type\": \"TEE\"\n  },\n  \"consumerPublicKey\": \"{{tee_consumer_public_key}}\",\n  \"apdCallbackUrl\": \"\",\n  \"issuedAt\": \"{{tee_issued_at}}\",\n  \"expiresAt\": \"{{tee_expires_at}}\",\n  \"signature\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{gov_root}}/v1/tee/sessions",
+              "host": [
+                "{{gov_root}}"
+              ],
+              "path": [
+                "v1",
+                "tee",
+                "sessions"
+              ]
+            },
+            "description": "gov_root = gov_layer without /api/v1 (the TEE routes are mounted at the server root). governanceContractId = contract_id (from 1b). Saves sessionId as tee_session_id.\n\nFill before sending: tee_resource_url (https; must equal a dataset's data_url on the signed contract, i.e. the data_url of the dataset's APD policy), tee_image_id and tee_image_hash (the anon workload image and its expected measurement), and optionally tee_consumer_public_key. consumerId, issuedAt and expiresAt are filled by the pre-request script.\n\n403 TEE_NOT_ENABLED until step 4 succeeds; 403 if resourceUrl isn't a dataset on the signed contract; 400 INVALID_CONTRACT if a required field is empty."
+          }
+        }
+      ]
     }
   ],
   "variable": [
@@ -1039,6 +1060,10 @@
     {
       "key": "gov_url",
       "value": "http://localhost:8083/api/v1"
+    },
+    {
+      "key": "gov_root",
+      "value": "http://localhost:8083"
     },
     {
       "key": "apd_url",
@@ -1157,12 +1182,52 @@
       "value": ""
     },
     {
+      "key": "provider_comment",
+      "value": "The resource is used for the job's TEE run"
+    },
+    {
+      "key": "feedback_to_consumer",
+      "value": "Access is limited to this job and contract"
+    },
+    {
       "key": "infra_provider_signature",
       "value": ""
     },
     {
       "key": "skip_infra_flow",
       "value": "true"
+    },
+    {
+      "key": "consumer_id",
+      "value": ""
+    },
+    {
+      "key": "tee_resource_url",
+      "value": ""
+    },
+    {
+      "key": "tee_image_id",
+      "value": ""
+    },
+    {
+      "key": "tee_image_hash",
+      "value": ""
+    },
+    {
+      "key": "tee_consumer_public_key",
+      "value": ""
+    },
+    {
+      "key": "tee_issued_at",
+      "value": ""
+    },
+    {
+      "key": "tee_expires_at",
+      "value": ""
+    },
+    {
+      "key": "tee_session_id",
+      "value": ""
     }
   ]
 }
