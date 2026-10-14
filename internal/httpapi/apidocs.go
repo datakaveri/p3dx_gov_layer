@@ -1,6 +1,6 @@
-// API specs page (GET /apis): the endpoint docs in apidocs/, embedded into the
-// binary and rendered in the browser. Public, no auth — it only describes the
-// routes, it calls none of them.
+// API specs page (GET /apis): ReDoc rendering the OpenAPI spec in
+// apidocs/openapi.yaml, both embedded into the binary. Public, no auth — it
+// only describes the routes, it calls none of them.
 package httpapi
 
 import (
@@ -13,42 +13,30 @@ import (
 //go:embed apidocs
 var apiDocsFS embed.FS
 
-// apiDocs maps the {doc} in GET /apis/{doc}.md to its file in apidocs/.
-var apiDocs = map[string]string{
-	"governance-layer": "apidocs/governance-layer.md",
-}
-
 // registerAPIDocsRoutes mounts the specs page at the root, alongside the TEE
 // routes, so it sits at /apis rather than under /api/v1 or /governance.
 func (s *Server) registerAPIDocsRoutes(r chi.Router) {
 	r.Get("/apis", s.apiDocsPage)
 	r.Get("/apis/", s.apiDocsPage)
-	r.Get("/apis/{doc}.md", s.apiDocsMarkdown)
+	r.Get("/apis/spec", s.apiDocsSpec)
 }
 
-// GET /apis — the HTML page; it fetches each doc from GET /apis/{doc}.md.
+// GET /apis — the ReDoc page; it loads the spec from GET /apis/spec.
 func (s *Server) apiDocsPage(w http.ResponseWriter, r *http.Request) {
-	page, err := apiDocsFS.ReadFile("apidocs/index.html")
-	if err != nil {
-		http.Error(w, "specs page missing", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(page)
+	serveAPIDoc(w, "apidocs/index.html", "text/html; charset=utf-8")
 }
 
-// GET /apis/{doc}.md — one endpoint doc as raw markdown.
-func (s *Server) apiDocsMarkdown(w http.ResponseWriter, r *http.Request) {
-	path, ok := apiDocs[chi.URLParam(r, "doc")]
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	md, err := apiDocsFS.ReadFile(path)
+// GET /apis/spec — the OpenAPI spec as YAML.
+func (s *Server) apiDocsSpec(w http.ResponseWriter, r *http.Request) {
+	serveAPIDoc(w, "apidocs/openapi.yaml", "application/x-yaml")
+}
+
+func serveAPIDoc(w http.ResponseWriter, path, contentType string) {
+	body, err := apiDocsFS.ReadFile(path)
 	if err != nil {
-		http.Error(w, "doc missing", http.StatusInternalServerError)
+		http.Error(w, "api docs missing", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	_, _ = w.Write(md)
+	w.Header().Set("Content-Type", contentType)
+	_, _ = w.Write(body)
 }
