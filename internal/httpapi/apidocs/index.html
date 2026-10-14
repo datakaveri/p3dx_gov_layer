@@ -62,7 +62,9 @@
 
     async function show(name) {
       try {
-        const res = await fetch("/apis/" + name + ".md");
+        // Relative to the page's own path, so it still resolves behind an
+        // ingress prefix (e.g. /gov-layer/apis -> /gov-layer/apis/<name>.md).
+        const res = await fetch(location.pathname.replace(/\/$/, "") + "/" + name + ".md");
         if (!res.ok) throw new Error("HTTP " + res.status);
         docEl.innerHTML = marked.parse(await res.text());
         // Turn `GET`/`POST`/... in a table's first column into method badges.
