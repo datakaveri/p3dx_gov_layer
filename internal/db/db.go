@@ -254,6 +254,28 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Who takes part in each job (job_participants.go): one row per
+		// consumer, and per data / infra provider and the dataset / infra they
+		// bring, with that user's status on the job. Written as the job moves
+		// (generate-contract, approvals, signing, final, TEE) so
+		// GET /jobs/user/{userId} can list a user's contracts.
+		`CREATE TABLE IF NOT EXISTS job_participants (
+			job_id TEXT NOT NULL,
+			contract_id TEXT NOT NULL,
+			technique TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL,
+			participant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
+			item_id TEXT NOT NULL DEFAULT '',
+			item_name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (job_id, role, participant_id, item_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS job_participants_participant_idx ON job_participants(lower(participant_id))`,
+		`CREATE INDEX IF NOT EXISTS job_participants_user_idx ON job_participants(lower(user_id))`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -266,6 +288,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table contracts ready")
 	log.Println("[DATABASE] Table vm_registry ready")
 	log.Println("[DATABASE] Table provider_public_keys ready")
+	log.Println("[DATABASE] Table job_participants ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }

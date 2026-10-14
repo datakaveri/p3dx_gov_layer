@@ -133,6 +133,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
 	r.Put("/job/{jobId}/status", s.putJobStatus)
 	r.Post("/job/{jobId}/tee", s.enableJobTEE)
+	// Every job (contract) a user takes part in (job_participants.go).
+	r.Get("/jobs/user/{userId}", s.getUserJobs)
 	//for the model.go
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)

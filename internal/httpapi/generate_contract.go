@@ -268,6 +268,12 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		sender = consumerID
 	}
 
+	// Who takes part in the job, for GET /jobs/user/{userId}
+	// (job_participants.go).
+	if stored {
+		s.recordJobParticipants(r.Context(), &contract, sender)
+	}
+
 	// A job that needs approval: ask each of its data and infra providers to
 	// approve or reject it (job_request.go).
 	providersNotified := 0

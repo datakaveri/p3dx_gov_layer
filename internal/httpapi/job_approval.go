@@ -83,6 +83,7 @@ func catalogueHas(items []services.CatalogueItem, item string) bool {
 type providerCaller struct {
 	token    string          // raw bearer token, forwarded to the DX catalogue
 	username string          // preferred_username, else email: whose registered public key verifies their signature
+	userID   string          // sub: their Keycloak user id
 	names    map[string]bool // provider_ids / usernames / emails / sub that name them on a contract
 	roles    []string        // realm roles
 }
@@ -100,6 +101,7 @@ func callerFromClaims(token string, claims jwt.MapClaims) providerCaller {
 		}
 	}
 	if sub, _ := claims["sub"].(string); sub != "" {
+		c.userID = sub
 		c.names[strings.ToLower(sub)] = true
 	}
 	if ra, ok := claims["realm_access"].(map[string]any); ok {
@@ -622,6 +624,7 @@ func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	s.markApprovalParticipants(reqCtx(r), db.ParticipantRoleDataProvider, jobID, own, caller)
 	// Accepted: the consumer may use the dataset — its APD consumer grant is
 	// posted now (PUT /job/{jobId}/status re-posts it; APD updates in place).
 	resp["grants"] = s.postConsumerGrants(reqCtx(r), db.AuditTypeDataProvider, jobID, c, own)
@@ -836,6 +839,7 @@ func (s *Server) handleInfraProviderApproval(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	if resp, ok := s.recordJobApproval(w, r, db.AuditTypeInfraProvider, jobID, c, entries, own, caller, body); ok {
+		s.markApprovalParticipants(reqCtx(r), db.ParticipantRoleInfraProvider, jobID, own, caller)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -1064,6 +1068,7 @@ func (s *Server) putJobStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	var finalRecord *db.FinalContract
 	if final {
+		s.markJobParticipants(ctx, jobID, db.ParticipantStatusFinal)
 		if finalRecord, err = s.db.GetFinalContract(ctx, jobID); err != nil {
 			writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
 			return
