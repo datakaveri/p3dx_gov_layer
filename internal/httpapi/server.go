@@ -73,6 +73,8 @@ func (s *Server) Handler() http.Handler {
 	// {TEE_ORCHESTRATOR_URL}/v1/tee/... so these must not sit under /api/v1.
 	s.registerTEERoutes(root)
 	s.registerTEESessionRoutes(root)
+	// API specs page (apidocs.go), also at the root: GET /apis.
+	s.registerAPIDocsRoutes(root)
 	return root
 }
 
@@ -133,6 +135,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
 	r.Put("/job/{jobId}/status", s.putJobStatus)
 	r.Post("/job/{jobId}/tee", s.enableJobTEE)
+	// The job's contract + its contract_hash (job_participants.go).
+	r.Get("/job/{jobId}/contract/{contractId}", s.getJobContract)
 	// Every job (contract) a user takes part in (job_participants.go).
 	r.Get("/jobs/user/{userId}", s.getUserJobs)
 	//for the model.go
