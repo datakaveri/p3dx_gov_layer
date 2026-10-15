@@ -1,6 +1,8 @@
 // Job participants: who takes part in each job (contract) and how far along
 // they are, kept in the job_participants table (internal/db/job_participants.go)
-// so GET /jobs/user/{userId} can list every contract a user is on.
+// so GET /jobs/user/{userId} can list every contract a user is on, and
+// GET /jobs/consumer/{userId} / GET /jobs/provider/{userId} the ones they
+// created / are requested on as a data provider.
 //
 // Rows are written as the job moves, always best-effort (a failed write is
 // logged and never fails the step itself):
@@ -209,6 +211,44 @@ func (s *Server) userJobNames(ctx context.Context, userID string) ([]string, err
 // infra provider — newest first, with their status on each. userId is their
 // Keycloak user id (sub); a username, email or provider id also works.
 func (s *Server) getUserJobs(w http.ResponseWriter, r *http.Request) {
+	s.listUserJobs(w, r, func(db.JobParticipant) bool { return true })
+}
+
+// GET /jobs/consumer/{userId} — Authorization: Bearer <a dev Keycloak token>.
+// The jobs (contracts) the user created, as their consumer, newest first.
+func (s *Server) getConsumerJobs(w http.ResponseWriter, r *http.Request) {
+	s.listUserJobs(w, r, isConsumerPart)
+}
+
+// GET /jobs/provider/{userId} — Authorization: Bearer <a dev Keycloak token>.
+// The jobs (contracts) the user is requested on as a data provider and has not
+// yet approved or rejected, newest first.
+func (s *Server) getProviderJobs(w http.ResponseWriter, r *http.Request) {
+	s.listUserJobs(w, r, isRequestedDataProviderPart)
+}
+
+func isConsumerPart(p db.JobParticipant) bool {
+	return p.Role == db.ParticipantRoleConsumer
+}
+
+func isRequestedDataProviderPart(p db.JobParticipant) bool {
+	return p.Role == db.ParticipantRoleDataProvider && p.Status == db.ParticipantStatusRequested
+}
+
+// filterJobParticipants is the rows keep accepts, in order.
+func filterJobParticipants(rows []db.JobParticipant, keep func(db.JobParticipant) bool) []db.JobParticipant {
+	out := []db.JobParticipant{}
+	for _, p := range rows {
+		if keep(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// listUserJobs writes the jobs of the userId path param's job_participants
+// rows that keep accepts, grouped by job (groupUserJobs).
+func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(db.JobParticipant) bool) {
 	if _, _, ok := s.devTokenClaims(w, r, "user"); !ok {
 		return
 	}
@@ -228,7 +268,7 @@ func (s *Server) getUserJobs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
 		return
 	}
-	jobs := groupUserJobs(rows)
+	jobs := groupUserJobs(filterJobParticipants(rows, keep))
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "user_id": userID, "count": len(jobs), "jobs": jobs})
 }
 

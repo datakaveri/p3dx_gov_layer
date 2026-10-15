@@ -139,6 +139,9 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/job/{jobId}/contract/{contractId}", s.getJobContract)
 	// Every job (contract) a user takes part in (job_participants.go).
 	r.Get("/jobs/user/{userId}", s.getUserJobs)
+	// The jobs a user created (consumer) / is requested on as a data provider.
+	r.Get("/jobs/consumer/{userId}", s.getConsumerJobs)
+	r.Get("/jobs/provider/{userId}", s.getProviderJobs)
 	//for the model.go
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)

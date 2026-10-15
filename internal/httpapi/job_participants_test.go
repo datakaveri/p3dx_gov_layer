@@ -59,3 +59,20 @@ func TestGroupUserJobs(t *testing.T) {
 		t.Errorf("jobs[1] = %+v", jobs[1])
 	}
 }
+
+func TestFilterJobParticipants(t *testing.T) {
+	rows := []db.JobParticipant{
+		{JobID: "job-3", Role: db.ParticipantRoleConsumer, Status: db.ParticipantStatusCreated},
+		{JobID: "job-2", Role: db.ParticipantRoleDataProvider, ItemID: "ds-1", Status: db.ParticipantStatusRequested},
+		{JobID: "job-2", Role: db.ParticipantRoleDataProvider, ItemID: "ds-2", Status: db.ParticipantStatusApproved},
+		{JobID: "job-1", Role: db.ParticipantRoleInfraProvider, ItemID: "infra-1", Status: db.ParticipantStatusRequested},
+	}
+	consumer := filterJobParticipants(rows, isConsumerPart)
+	if len(consumer) != 1 || consumer[0].JobID != "job-3" {
+		t.Errorf("consumer rows = %+v", consumer)
+	}
+	provider := filterJobParticipants(rows, isRequestedDataProviderPart)
+	if len(provider) != 1 || provider[0].JobID != "job-2" || provider[0].ItemID != "ds-1" {
+		t.Errorf("provider rows = %+v", provider)
+	}
+}

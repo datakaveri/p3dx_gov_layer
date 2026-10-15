@@ -1,0 +1,3504 @@
+openapi: 3.0.2
+info:
+  title: DX Governance Layer Server
+  version: 1.0.0
+  description: |-
+
+    # About DX Governance Layer
+
+      **Governance Layer** (`p3dx_gov_layer`) is the trust and policy layer of the P3DX platform.
+    It builds the contract behind every privacy-preserving computation (Federated Learning, TEE and SMPC),
+    gets that contract approved and signed by every data and infra provider, checks it against the
+    providers' policies in APD, and only then lets the computation run.
+
+    It also keeps the participation notifications, projects, final FL models and participant-VM registry
+    that the FL flow uses.
+
+    # Configurations
+    - **Server**:
+      - In the doc, we display the server url to be https://v2.dev.iudx.io/gov-layer with the hostname as v2.dev.iudx.io/gov-layer
+      - This could be configured according to the deployment
+    - **Base path**:
+      - Base path is the path on which API is served, relative to the host
+      - All the APIs in this document contain `/api/v1` as their base path
+      - Every API is also served, unchanged, under the `/governance` base path (e.g. `/governance/contracts`)
+    - **Request Samples**:
+      - The `<tokenValue>` in the header of request sample could be replaced with respective token value [Also refer Tokens section [here](#section/Tokens)]
+      - The `<payload>` in the request sample could be replaced with the payload given adjacent to the request sample
+
+    # Tokens
+     - Endpoints that need a token take it as `Authorization: Bearer <tokenValue>`, except `POST /contract`, which takes it in the request body
+     - Endpoints not listed here need no token
+
+    | Endpoint | Token Type | Users |
+    |----------|------------|--------|
+    | [(PUT) /provider-keys/{role}](#operation/put-provider-key) | P3DX Keycloak Token or DX Keycloak Token | Data Provider, Infra Provider |
+    | [(GET) /provider-keys/{role}/status](#operation/get-provider-key-status) | P3DX Keycloak Token or DX Keycloak Token | Data Provider, Infra Provider |
+    | [(POST) /contract](#operation/post-contract) | Keycloak Token (in body) | Consumer |
+    | [(POST) /generate-contract](#operation/post-generate-contract) | Keycloak Token | Consumer |
+    | [(POST) /contracts/{contractId}/sign](#operation/post-contract-sign) | P3DX Keycloak Token or DX Keycloak Token | Data Provider |
+    | [(POST) /job/approval/data-provider](#operation/post-job-approval-data-provider) | DX Keycloak Token | Data Provider |
+    | [(POST) /job/approval/infra-provider](#operation/post-job-approval-infra-provider) | DX Keycloak Token | Infra Provider |
+    | [(PUT) /job/{jobId}/status](#operation/put-job-status) | DX Keycloak Token | Consumer (the job's) |
+    | [(POST) /job/{jobId}/tee](#operation/post-job-tee) | DX Keycloak Token | Consumer (the job's) |
+    | [(GET) /job/{jobId}/contract/{contractId}](#operation/get-job-contract) | DX Keycloak Token | Consumer, Data Provider, Infra Provider (the job's) |
+    | [(GET) /jobs/user/{userId}](#operation/get-user-jobs) | DX Keycloak Token | Any user |
+    | [(GET) /jobs/consumer/{userId}](#operation/get-consumer-jobs) | DX Keycloak Token | Consumer |
+    | [(GET) /jobs/provider/{userId}](#operation/get-provider-jobs) | DX Keycloak Token | Data Provider |
+    | [(POST) /vm-registry](#operation/post-vm-registry) | `X-VM-Registry-Token` header | Provisioning scripts |
+    | [(GET) /vm-registry/output-owner](#operation/get-vm-registry-output-owner) | `X-VM-Registry-Token` header | Provisioning scripts |
+    | [(GET) /vm-registry/data-providers](#operation/get-vm-registry-data-providers) | `X-VM-Registry-Token` header | Provisioning scripts |
+
+    The `X-VM-Registry-Token` header is only checked when the deployment sets `VM_REGISTRY_TOKEN`.
+
+    # Job flow (TEE / SMPC with datasets and infra)
+    1. Each provider registers their public key: `PUT /provider-keys/{role}`, and can check it is registered: `GET /provider-keys/{role}/status`
+    2. The consumer generates the contract: `POST /generate-contract` (returns `job_id`, `contract_id` and `contract_hash`)
+    3. Each data provider lists the jobs requested from them: `GET /jobs/provider/{userId}` (an infra provider uses `GET /jobs/user/{userId}`, where their `participation` entry has `status` = `requested`), and gets the contract and its `contract_hash`: `GET /job/{jobId}/contract/{contractId}`
+    4. Each data provider and infra provider approves the job and signs the `contract_hash`: `POST /job/approval/data-provider`, `POST /job/approval/infra-provider`
+    5. The consumer can check which providers have signed: `GET /contracts/{contractId}/signatures`
+    6. The consumer cross-verifies the approvals and signatures, which makes the contract final: `PUT /job/{jobId}/status`
+    7. The consumer enables the TEE run: `POST /job/{jobId}/tee`
+
+    The consumer can list the jobs they created and see each one's status at any point: `GET /jobs/consumer/{userId}`.
+
+    # API HTTP Responses
+     Apart from the response codes specified in each API, the API server may respond with certain 4xx and 5xx error codes which are related to common API Gateway behaviours.
+     The application should address them accordingly.
+
+  contact:
+    name: For support contact CDPG Team at
+    email: support@datakaveri.org
+    url: https://dataforpublicgood.org.in/
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+servers:
+  - url: https://v2.dev.iudx.io/gov-layer
+    description: dynamic server url
+tags:
+  - name: Data Providers
+    description: The provider directory used by the FL flow.
+  - name: Provider Keys
+    description: Each provider's contract-signing RSA public key.
+  - name: Notifications
+    description: FL participation requests and the providers' responses.
+  - name: Contracts
+    description: Building, storing and submitting contracts for FL, TEE and SMPC.
+  - name: Contract Signing
+    description: Data-provider signatures over a contract's hash.
+  - name: Projects
+    description: The project recorded against each FL session.
+  - name: Job Approval
+    description: Data and infra providers approving a job, and the consumer cross-verifying it.
+  - name: Jobs
+    description: A job's contract, and every job a user takes part in.
+  - name: Final Models
+    description: The global models produced by FL sessions.
+  - name: VM Registry
+    description: IP addresses of the participant VMs created for an FL session.
+paths:
+  /api/v1/data-providers:
+    get:
+      tags:
+        - Data Providers
+      summary: List Data Providers
+      description: |
+        Returns the data providers known to the Governance Layer, with their id, name and email.
+      operationId: get-data-providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  data_providers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DataProvider'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    data_providers:
+                      - id: provider-alice
+                        name: Alice
+                        email: alice@example.com
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: List data providers
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/data-providers'
+
+  /api/v1/provider-keys/{role}:
+    put:
+      tags:
+        - Provider Keys
+      summary: Register Provider Public Key
+      description: |
+        Registers (or replaces) the caller's contract-signing public key. Contract and job-approval
+        signatures from this provider are verified against it.
+
+        * The key is stored under the username in the caller's token, never one from the body.
+        * The caller must hold the `{role}` realm role.
+        * The key must be an RSA public key of at least 2048 bits, in SPKI PEM form (`-----BEGIN PUBLIC KEY-----`).
+        * The key is per user: one key serves both provider roles.
+        * `rotated` is `true` when an existing key was replaced.
+      operationId: put-provider-key
+      parameters:
+        - $ref: '#/components/parameters/RoleParam'
+      requestBody:
+        description: |
+          - `public_key_pem` : The provider's RSA public key in SPKI PEM form
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                public_key_pem:
+                  type: string
+              required:
+                - public_key_pem
+            examples:
+              Register Public Key:
+                value:
+                  public_key_pem: "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----\n"
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  fingerprint_sha256:
+                    type: string
+                    description: SHA-256 of the key's DER bytes, hex-encoded
+                  rotated:
+                    type: boolean
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    fingerprint_sha256: 3f1c9a0e5b7d2c4a8e6f1b3d5c7a9e0f2b4d6c8a0e2f4b6d8c0a2e4f6b8d0c2a
+                    rotated: false
+        '400':
+          description: |-
+            Bad Request
+            - `ROLE_NOT_ALLOWED` : `{role}` is not `data-provider` or `infra-provider`
+            - `MISSING_PUBLIC_KEY`, `PRIVATE_KEY_NOT_ACCEPTED`, `EXPECTED_SPKI_PEM`, `INVALID_PUBLIC_KEY`, `EXPECTED_RSA_KEY`, `KEY_TOO_SHORT` : the key is not acceptable
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: KEY_TOO_SHORT
+        '401':
+          $ref: '#/components/responses/ProviderTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `INSUFFICIENT_ROLE` : the token does not hold the `{role}` realm role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: INSUFFICIENT_ROLE
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Register public key
+          source: |
+            curl --location --request PUT 'https://v2.dev.iudx.io/gov-layer/api/v1/provider-keys/data-provider' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/provider-keys/{role}/status:
+    get:
+      tags:
+        - Provider Keys
+      summary: Get Provider Public Key Status
+      description: |
+        Shows whether the caller already has a public key registered. `{role}` only checks that the
+        caller holds that role; the key itself is per user.
+      operationId: get-provider-key-status
+      parameters:
+        - $ref: '#/components/parameters/RoleParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  exists:
+                    type: boolean
+              examples:
+                Key registered:
+                  value:
+                    status: SUCCESS
+                    exists: true
+                No key yet:
+                  value:
+                    status: SUCCESS
+                    exists: false
+        '400':
+          description: |-
+            Bad Request
+            - `ROLE_NOT_ALLOWED` : `{role}` is not `data-provider` or `infra-provider`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: ROLE_NOT_ALLOWED
+        '401':
+          $ref: '#/components/responses/ProviderTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `INSUFFICIENT_ROLE` : the token does not hold the `{role}` realm role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: INSUFFICIENT_ROLE
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get public key status
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/provider-keys/data-provider/status' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/send-provider-message:
+    post:
+      tags:
+        - Notifications
+      summary: Send Provider Message
+      description: |
+        Stores a message for a data provider, e.g. from an FL output owner.
+      operationId: post-send-provider-message
+      requestBody:
+        description: |
+          - `provider_id` : The provider's id
+          - `provider_email` : The provider's email
+          - `provider_name` : The provider's name
+          - `output_owner_id` : The sender's id
+          - `message` : The message text
+          - `timestamp` : Optional, ISO8601
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider_id:
+                  type: string
+                provider_email:
+                  type: string
+                  format: email
+                provider_name:
+                  type: string
+                output_owner_id:
+                  type: string
+                message:
+                  type: string
+                timestamp:
+                  type: string
+                  nullable: true
+              required:
+                - provider_id
+                - provider_email
+            examples:
+              Send Message:
+                value:
+                  provider_id: provider-alice
+                  provider_email: alice@example.com
+                  provider_name: Alice
+                  output_owner_id: bob
+                  message: Your dataset has been selected for an FL session.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                  message_id:
+                    type: string
+                  data:
+                    type: object
+                    properties:
+                      provider_id:
+                        type: string
+                      provider_name:
+                        type: string
+                      provider_email:
+                        type: string
+                      message:
+                        type: string
+              examples:
+                Example:
+                  value:
+                    status: success
+                    message: Message sent to provider
+                    message_id: 6f1d2c3b-4a5e-4f60-8a7b-9c0d1e2f3a4b
+                    data:
+                      provider_id: provider-alice
+                      provider_name: Alice
+                      provider_email: alice@example.com
+                      message: Your dataset has been selected for an FL session.
+        '400':
+          description: |-
+            Bad Request
+            - `MISSING_PROVIDER_INFO` : `provider_id` or `provider_email` is missing
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: MISSING_PROVIDER_INFO
+                    message: provider_id and provider_email are required
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Send provider message
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/send-provider-message' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/notifications:
+    post:
+      tags:
+        - Notifications
+      summary: Create Participation Requests
+      description: |
+        Creates one notification per recipient, e.g. an FL output owner asking each selected provider
+        whether they will still take part. The `payload` is stored as-is; for FL it carries the
+        `submission_id`, which is what a provider's acceptance later signs (see
+        [Respond to Notification](#operation/post-notification-respond)).
+      operationId: post-notifications
+      requestBody:
+        description: |
+          - `recipients` : The providers to notify, each with `id` and `username`
+          - `senderUsername` : The sender's username
+          - `message` : The message text
+          - `payload` : Any JSON, stored with every notification
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipients:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      username:
+                        type: string
+                senderUsername:
+                  type: string
+                message:
+                  type: string
+                payload:
+                  type: object
+                  additionalProperties: true
+              required:
+                - recipients
+            examples:
+              Create Participation Requests:
+                value:
+                  recipients:
+                    - id: provider-alice
+                      username: alice
+                    - id: provider-carol
+                      username: carol
+                  senderUsername: bob
+                  message: Are you still willing to join this FL session?
+                  payload:
+                    submission_id: sub-2026-10-14-001
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  created:
+                    type: integer
+                  notifications:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CreatedNotification'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    created: 1
+                    notifications:
+                      - id: 9b2e7c1a-0d4f-4e3b-a6c5-1f2e3d4c5b6a
+                        recipientId: provider-alice
+                        recipientUsername: alice
+                        senderUsername: bob
+                        message: Are you still willing to join this FL session?
+                        payload:
+                          submission_id: sub-2026-10-14-001
+                        read: false
+                        created_at: '2026-10-14T10:15:00.000Z'
+        '400':
+          description: |-
+            Bad Request
+            - `MISSING_RECIPIENTS` : `recipients` is empty
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: MISSING_RECIPIENTS
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Create participation requests
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/notifications' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/notifications/{key}:
+    get:
+      tags:
+        - Notifications
+      summary: Get Notifications for a User
+      description: |
+        Returns every notification sent to one user, including contract sign requests
+        (`payload.type` = `CONTRACT_SIGN`) and job requests.
+      operationId: get-notifications
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The recipient's username
+          schema:
+            type: string
+          example: alice
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationList'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    notifications:
+                      - id: 9b2e7c1a-0d4f-4e3b-a6c5-1f2e3d4c5b6a
+                        recipient_id: provider-alice
+                        recipient_username: alice
+                        sender_username: bob
+                        message: Are you still willing to join this FL session?
+                        payload:
+                          submission_id: sub-2026-10-14-001
+                        read: false
+                        read_at: null
+                        created_at: '2026-10-14T10:15:00Z'
+                        response: null
+                        response_message: null
+                        responded_at: null
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get notifications
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/notifications/alice'
+
+  /api/v1/notifications/by-sender/{key}:
+    get:
+      tags:
+        - Notifications
+      summary: Get Notifications Sent by a User
+      description: |
+        Returns every notification a user has sent, so an FL output owner can see each selected
+        provider's response (`response` is `null` until they answer).
+      operationId: get-notifications-by-sender
+      parameters:
+        - name: key
+          in: path
+          required: true
+          description: The sender's username
+          schema:
+            type: string
+          example: bob
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationList'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get sent notifications
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/notifications/by-sender/bob'
+
+  /api/v1/notifications/{key}/read:
+    patch:
+      tags:
+        - Notifications
+      summary: Mark Notification as Read
+      description: |
+        Marks one notification as read.
+      operationId: patch-notification-read
+      parameters:
+        - $ref: '#/components/parameters/NotificationIdParam'
+      requestBody:
+        description: |
+          - `username` : The recipient's username
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+            examples:
+              Mark Read:
+                value:
+                  username: alice
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResult'
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Mark notification read
+          source: |
+            curl --location --request PATCH 'https://v2.dev.iudx.io/gov-layer/api/v1/notifications/<notificationId>/read' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/notifications/{key}/respond:
+    post:
+      tags:
+        - Notifications
+      summary: Respond to Notification
+      description: |
+        A provider accepts or declines a participation request, with an optional reason for the owner.
+
+        For FL, accepting is the provider's agreement: when the notification's `payload` carries a
+        `submission_id`, the provider is marked as signed on that session's contract.
+      operationId: post-notification-respond
+      parameters:
+        - $ref: '#/components/parameters/NotificationIdParam'
+      requestBody:
+        description: |
+          - `username` : The responding provider's username
+          - `response` : `accepted` or `declined`
+          - `message` : Optional reason
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                response:
+                  type: string
+                  enum:
+                    - accepted
+                    - declined
+                message:
+                  type: string
+              required:
+                - username
+                - response
+            examples:
+              Accept:
+                value:
+                  username: alice
+                  response: accepted
+              Decline:
+                value:
+                  username: alice
+                  response: declined
+                  message: Dataset is being refreshed this week.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResult'
+        '400':
+          description: |-
+            Bad Request
+            - `MISSING_USERNAME` : `username` is missing
+            - `INVALID_RESPONSE` : `response` is not `accepted` or `declined`
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: INVALID_RESPONSE
+                    message: response must be 'accepted' or 'declined'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Respond to notification
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/notifications/<notificationId>/respond' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/contract:
+    post:
+      tags:
+        - Contracts
+      summary: Submit Signed Contract
+      description: |
+        Submits a contract signed by the consumer and routes it by its `technique`.
+
+        The consumer's Keycloak token is sent **in the body** (`access_token`, or `token`), not in a header.
+        The `signature` is the consumer's hex-encoded signature over the JSON of `contract`, verified with
+        the public key bound to that token.
+
+        Pathways:
+
+        * `FL` : fetches each dataset's provider form and policy from APD, stores the contract and returns `202`.
+          The FL session itself is started by separate endpoints.
+        * `TEE` / `SMPC` : when the deployment requires it, every data provider must have signed the contract first
+          (`403 CONTRACT_NOT_SIGNED` otherwise). Each dataset is then authorized against its APD policy, the contract is
+          stored and signed by the Governance Layer, and deployed to the enclave / SMPC executor.
+
+        Errors from this endpoint are plain text, not JSON (except `CONTRACT_NOT_SIGNED`).
+      operationId: post-contract
+      requestBody:
+        description: |
+          - `access_token` : The consumer's Keycloak token (`token` is accepted instead)
+          - `contract` : The contract; its `technique` picks the pathway
+          - `signature` : The consumer's hex-encoded signature of `contract`
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                access_token:
+                  type: string
+                token:
+                  type: string
+                contract:
+                  $ref: '#/components/schemas/Contract'
+                signature:
+                  type: string
+                  description: hex-encoded
+              required:
+                - contract
+                - signature
+            examples:
+              Submit SMPC Contract:
+                value:
+                  access_token: <tokenValue>
+                  contract:
+                    contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                    technique: SMPC
+                    parties:
+                      data_providers:
+                        - id: provider-alice
+                          name: Alice
+                          dataset_name: hospital-admissions-2025
+                  signature: 3a5f9c...e81d
+      responses:
+        '200':
+          description: OK (TEE / SMPC deployed)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  pathway:
+                    type: string
+                    example: GENERAL
+                  technique:
+                    type: string
+                    enum:
+                      - TEE
+                      - SMPC
+                  orch_signature:
+                    type: string
+                    description: The Governance Layer's hex-encoded signature of the contract
+                  contract_id:
+                    type: string
+              examples:
+                Example:
+                  value:
+                    status: success
+                    pathway: GENERAL
+                    technique: SMPC
+                    orch_signature: 7b1e4d...90af
+                    contract_id: c-8f3a2b1c
+        '202':
+          description: Accepted (FL)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  pathway:
+                    type: string
+                    example: FL
+                  datasets:
+                    type: integer
+                    description: Number of datasets on the contract
+                  forms:
+                    type: integer
+                    description: Number of provider forms found in APD
+              examples:
+                Example:
+                  value:
+                    status: success
+                    pathway: FL
+                    datasets: 2
+                    forms: 2
+        '400':
+          description: |-
+            Bad Request (plain text)
+            - `Invalid request body`, `Invalid contract`, `Invalid signature encoding`
+            - `Contract missing technique field`, `Unsupported technique: <technique>`
+            - `Contract missing datasets`
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Contract missing technique field
+        '401':
+          description: |-
+            Unauthorized (plain text)
+            - `Invalid Keycloak token`, `Invalid token claims`
+            - `Token missing bound public key`
+            - `Contract signature verification failed`
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Contract signature verification failed
+        '403':
+          description: |-
+            Forbidden
+            - `CONTRACT_NOT_SIGNED` (JSON) : not every data provider has signed the contract yet (TEE / SMPC)
+            - `User not authorized by provider policy for dataset <id>` (plain text) : an APD policy does not allow this consumer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: CONTRACT_NOT_SIGNED
+                    message: 'waiting on provider signatures: provider-alice (not signed)'
+            text/plain:
+              schema:
+                type: string
+              example: User not authorized by provider policy for dataset provider-alice
+        '404':
+          description: |-
+            Not Found
+            - `CONTRACT_NOT_FOUND` : no stored contract with this `contract_id` (TEE / SMPC, when signing is required)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '500':
+          description: |-
+            Internal Server Error (plain text)
+            - `Policy authorization failed for dataset <id>: <reason>`
+            - `Failed to load orchestrator private key`, `Storage failed`, `Contract signing failed`
+            - `Deployment failed: <reason>`
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: 'Deployment failed: enclave unreachable'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Submit signed contract
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/contract' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/contract/{sessionId}:
+    get:
+      tags:
+        - Contracts
+      summary: Get Contract by Session
+      description: |
+        Returns the latest stored contract for an FL session.
+      operationId: get-contract-by-session
+      parameters:
+        - $ref: '#/components/parameters/SessionIdParam'
+      responses:
+        '200':
+          $ref: '#/components/responses/ContractResult'
+        '404':
+          description: |-
+            Not Found
+            - No contract for this session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: No contract for this session
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get contract by session
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contract/<sessionId>'
+
+  /api/v1/contracts:
+    post:
+      tags:
+        - Contracts
+      summary: Build FL Contract
+      description: |
+        Builds an FL session contract from a submission and its parties, and stores it as a new project
+        (a new `project_id` every call). Called by the AAA layer:
+
+        * when the owner sends the participation request (`finalize: false`, a draft), and
+        * when the owner sends the final roster (`finalize: true`).
+
+        On the final roster, the Governance Layer signs the contract hash and sends every data provider a
+        `CONTRACT_SIGN` request. The FL session cannot start until they have all signed
+        (see [Get Session Contract Signatures](#operation/get-session-contract-signatures)).
+      operationId: post-contracts
+      requestBody:
+        description: |
+          - `submission_id` : The FL submission (session) id
+          - `output_owner_user_id` : The output owner's Keycloak user id
+          - `parties` : The data providers, each with `id`, `username`, `dataset_name` and `data_url`
+          - `finalize` : `true` for the final roster contract
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                submission_id:
+                  type: string
+                output_owner_user_id:
+                  type: string
+                parties:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      username:
+                        type: string
+                      dataset_name:
+                        type: string
+                      data_url:
+                        type: string
+                finalize:
+                  type: boolean
+                  default: false
+              required:
+                - submission_id
+            examples:
+              Final Roster:
+                value:
+                  submission_id: sub-2026-10-14-001
+                  output_owner_user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                  parties:
+                    - id: provider-alice
+                      username: alice
+                      dataset_name: hospital-admissions-2025
+                      data_url: https://data.example.com/admissions.csv
+                  finalize: true
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  contract_id:
+                    type: string
+                  finalized:
+                    type: boolean
+                  contract:
+                    $ref: '#/components/schemas/Contract'
+                  sign_requests_sent:
+                    type: integer
+                    description: Number of data providers asked to sign (final roster only)
+        '400':
+          description: |-
+            Bad Request
+            - `MISSING_SELECTOR` : `submission_id` is missing
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: MISSING_SELECTOR
+                    message: submission_id is required
+        '404':
+          description: |-
+            Not Found
+            - Submission not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: Submission not found
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Build FL contract
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/contracts/by-project/{projectId}:
+    get:
+      tags:
+        - Contracts
+      summary: Get Contract by Project
+      description: |
+        Returns the exact contract stored for one project (not just a session's latest one).
+      operationId: get-contract-by-project
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/ContractResult'
+        '404':
+          description: |-
+            Not Found
+            - No contract for this project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: No contract for this project
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get contract by project
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/by-project/<projectId>'
+
+  /api/v1/generate-contract:
+    post:
+      tags:
+        - Contracts
+      summary: Generate Contract
+      description: |
+        Builds an unsigned contract from the consumer's dataset and technique selection, stores it as a draft
+        and returns it. Regenerating the same selection replaces the same draft (with a new `contract_id`).
+
+        For every selected dataset the APD policy is fetched (and, for FL, the provider form). A missing policy
+        never fails the request. For TEE / SMPC without an APD policy, the dataset's DX catalogue owner is taken
+        as its provider.
+
+        What happens next depends on the contract:
+
+        * **Datasets and infra (job approval)** : the contract is hashed and stored with its `contract_hash`, and
+          each data and infra provider is sent a job request. `signing` is `on_hold_pending_approval`; see the
+          [Job Approval](#tag/Job-Approval) endpoints.
+        * **Other TEE / SMPC** : the Governance Layer signs the hash and sends each data provider a `CONTRACT_SIGN`
+          request. `signing` is `requested`.
+        * **FL** : nothing is sent yet; FL is signed on its final roster contract. `signing` is `not_applicable`.
+
+        Errors from this endpoint are plain text, not JSON.
+      operationId: post-generate-contract
+      requestBody:
+        description: |
+          - `datasets` : The selected datasets, each with `dataset_id` and `dataset_name`
+          - `technique` : `FL`, `TEE` or `SMPC`
+          - `application_id` : Optional, the application to run
+          - `provider_id` : Optional, overrides the provider named by the APD policy
+          - `compute_choice` : Optional, defaulted per technique
+          - `infra_ids` : The selected infrastructures; SMPC needs exactly 2
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                datasets:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    properties:
+                      dataset_id:
+                        type: string
+                      dataset_name:
+                        type: string
+                technique:
+                  type: string
+                  enum:
+                    - FL
+                    - TEE
+                    - SMPC
+                application_id:
+                  type: string
+                provider_id:
+                  type: string
+                compute_choice:
+                  type: string
+                infra_ids:
+                  type: array
+                  items:
+                    type: string
+              required:
+                - datasets
+                - technique
+            examples:
+              TEE with infra (job approval):
+                value:
+                  datasets:
+                    - dataset_id: b34eb955-c691-4fd3-b200-f18bc78810a2
+                      dataset_name: hospital-admissions-2025
+                  technique: TEE
+                  infra_ids:
+                    - infra-azure-cvm-01
+              SMPC:
+                value:
+                  datasets:
+                    - dataset_id: b34eb955-c691-4fd3-b200-f18bc78810a2
+                      dataset_name: hospital-admissions-2025
+                  technique: SMPC
+                  infra_ids:
+                    - infra-node-a
+                    - infra-node-b
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  contract:
+                    $ref: '#/components/schemas/Contract'
+                  sign_requests_sent:
+                    type: integer
+                  signing:
+                    type: string
+                    enum:
+                      - not_applicable
+                      - on_hold_pending_approval
+                      - requested
+                  approval_required:
+                    type: boolean
+                    description: '`true` when the contract names both datasets and infra'
+                  providers_notified:
+                    type: integer
+                    description: Number of job requests sent (job approval only)
+              examples:
+                Job approval:
+                  value:
+                    status: success
+                    contract:
+                      job_id: job-7d1e3c9a
+                      contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                      technique: TEE
+                      contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                    sign_requests_sent: 0
+                    signing: on_hold_pending_approval
+                    approval_required: true
+                    providers_notified: 2
+        '400':
+          description: |-
+            Bad Request (plain text)
+            - `Invalid request body`
+            - `at least one dataset is required`
+            - `technique must be one of FL, TEE, SMPC`
+            - `exactly 2 infra_ids are required for SMPC`
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: exactly 2 infra_ids are required for SMPC
+        '401':
+          description: |-
+            Unauthorized (plain text)
+            - `Invalid Keycloak token`, `Invalid token claims`
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Invalid Keycloak token
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Generate contract
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/generate-contract' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/contracts/{contractId}/sign:
+    post:
+      tags:
+        - Contract Signing
+      summary: Sign Contract
+      description: |
+        A data provider signs the contract's hash and sends the signature back.
+
+        * The signer is the user in the provider's own token, never the body. If `provider_username` is sent it must match.
+        * The Governance Layer re-hashes its own stored copy of the contract; the stored hash, the fresh hash and
+          `contract_hash` must all agree.
+        * The contract must carry a valid Governance Layer signature, and the caller must be one of its data providers.
+        * The signature is verified with the public key registered at
+          [Register Provider Public Key](#operation/put-provider-key).
+        * A contract that needs job approval can only be signed once the job is approved.
+
+        The reply is only `{"status": "signed", ...}` or `{"status": "not signed", "message": <reason>}`, with the HTTP status of the failure.
+      operationId: post-contract-sign
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      requestBody:
+        description: |
+          - `contract_hash` : The hash from the sign request
+          - `signature` : The provider's base64 RSA signature (RSASSA-PKCS1-v1_5, SHA-256) over `contract_hash`
+          - `provider_username` : Optional, must match the token's user
+          - `notification_id` : Optional, the sign request to mark answered
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contract_hash:
+                  type: string
+                signature:
+                  type: string
+                provider_username:
+                  type: string
+                notification_id:
+                  type: string
+              required:
+                - contract_hash
+                - signature
+            examples:
+              Sign Contract:
+                value:
+                  contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                  signature: kX9v2Lq...Q==
+                  notification_id: 9b2e7c1a-0d4f-4e3b-a6c5-1f2e3d4c5b6a
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: signed
+                    message: sent to governance layer
+        '400':
+          description: |-
+            Bad Request
+            - `contract_hash` or `signature` missing
+            - The contract is a draft (only the final roster contract is signed)
+            - The provider has no registered public key
+            - The signature does not verify
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: not signed
+                    message: contract_hash and signature are required
+        '401':
+          description: |-
+            Unauthorized
+            - Token missing, invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: not signed
+                    message: MISSING_AUTH_TOKEN
+        '403':
+          description: |-
+            Forbidden
+            - `provider_username` does not match the token's user
+            - The caller is not a data provider on this contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: not signed
+                    message: NOT_A_PARTY
+        '404':
+          description: |-
+            Not Found
+            - No such contract (it may have been regenerated)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: not signed
+                    message: contract not found — it may have been regenerated
+        '409':
+          description: |-
+            Conflict
+            - The job is not approved yet
+            - The signed hash does not match the Governance Layer's copy of the contract
+            - The contract has no valid Governance Layer signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+              examples:
+                Example:
+                  value:
+                    status: not signed
+                    message: signed hash does not match the governance layer's copy of the contract
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+        '502':
+          description: |-
+            Bad Gateway
+            - The provider's public key could not be looked up
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignResult'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Sign contract
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>/sign' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/contracts/{contractId}/signatures:
+    get:
+      tags:
+        - Contract Signing
+      summary: Get Contract Signatures
+      description: |
+        Re-verifies every signature on a contract and reports whether the run can start.
+        `matching` / `can run` only when the contract is a final (signable) contract and every signature verifies.
+      operationId: get-contract-signatures
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      responses:
+        '200':
+          $ref: '#/components/responses/SignatureStatus'
+        '404':
+          $ref: '#/components/responses/ContractNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get contract signatures
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>/signatures'
+
+  /api/v1/contracts/by-session/{sessionId}/signatures:
+    get:
+      tags:
+        - Contract Signing
+      summary: Get Session Contract Signatures
+      description: |
+        The same check as [Get Contract Signatures](#operation/get-contract-signatures), for an FL session's latest contract.
+        The AAA layer checks this before starting an FL session.
+      operationId: get-session-contract-signatures
+      parameters:
+        - $ref: '#/components/parameters/SessionIdParam'
+      responses:
+        '200':
+          $ref: '#/components/responses/SignatureStatus'
+        '404':
+          $ref: '#/components/responses/ContractNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get session contract signatures
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/by-session/<sessionId>/signatures'
+
+  /api/v1/projects/{sessionId}:
+    get:
+      tags:
+        - Projects
+      summary: Get Project ID for Session
+      description: |
+        Returns only the `project_id` recorded for an FL session (the participant list stays internal).
+      operationId: get-project
+      parameters:
+        - $ref: '#/components/parameters/SessionIdParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  project_id:
+                    type: string
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    project_id: proj-4e2a9c1b
+        '404':
+          description: |-
+            Not Found
+            - No project for this session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: No project for this session
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get project
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/projects/<sessionId>'
+
+  /api/v1/projects:
+    get:
+      tags:
+        - Projects
+      summary: List Projects
+      description: |
+        Lists projects, newest first. With `owner`, only that output owner's projects; without it, every project
+        (the FL orchestrator's view).
+      operationId: get-projects
+      parameters:
+        - name: owner
+          in: query
+          required: false
+          description: The output owner's username
+          schema:
+            type: string
+          example: bob
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    projects:
+                      - project_id: proj-4e2a9c1b
+                        session_id: sub-2026-10-14-001
+                        data_provider_usernames:
+                          - alice
+                          - carol
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: List projects
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/projects?owner=bob'
+
+  /api/v1/job/approval/data-provider:
+    post:
+      tags:
+        - Job Approval
+      summary: Data Provider Approves Job
+      description: |
+        A data provider approves a job and signs its contract hash.
+
+        * Each of the caller's own datasets on the job's contract is checked: the caller must hold the data-provider role
+          and the dataset must be theirs in the DX catalogue. The result is recorded in the job's audit history.
+        * When the caller's datasets are accepted, the signature is verified with their registered public key before anything
+          is recorded; a bad signature is refused with `400 INVALID_SIGNATURE`.
+        * For each accepted dataset an APD consumer grant (`grants`) and an IUDX APD policy (`iudx_policies`) are posted.
+          A failed post is reported, never fails the approval; calling again retries it.
+
+        `approval` is the caller's own result; `job_approval` is the whole job's.
+      operationId: post-job-approval-data-provider
+      requestBody:
+        $ref: '#/components/requestBodies/ApprovalBody'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApprovalResult'
+                  - type: object
+                    properties:
+                      grants:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/GrantResult'
+                      iudx_policies:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/IudxPolicyResult'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    job_id: job-7d1e3c9a
+                    type: data-provider
+                    approval: accepted
+                    data_provider: accepted
+                    infra_provider: pending
+                    job_approval: pending
+                    entries:
+                      - id: 41
+                        job_id: job-7d1e3c9a
+                        type: data-provider
+                        provider_id: provider-alice
+                        item: b34eb955-c691-4fd3-b200-f18bc78810a2
+                        status: accepted
+                        has_role: true
+                        in_catalogue: true
+                        checked_at: '2026-10-14T10:20:00Z'
+                    signature:
+                      submitted: true
+                      contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                      items_signed: 1
+                      verified_at: PUT /job/job-7d1e3c9a/status
+                      verified: true
+                    grants:
+                      - item_type: dataset
+                        item_id: b34eb955-c691-4fd3-b200-f18bc78810a2
+                        policy_id: grant-job-7d1e3c9a-b34eb955
+                        status: posted
+                    iudx_policies:
+                      - item_id: b34eb955-c691-4fd3-b200-f18bc78810a2
+                        policy_id: 1c2d3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f
+                        status: posted
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : invalid body, or `job_id` missing
+            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `MISSING_FIELDS` : `contract_hash` or `signature` missing
+            - `INVALID_SIGNATURE` : the hash is not this job's, the caller has no registered key, or the signature does not verify
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: MISSING_FIELDS
+                    message: 'contract_hash and signature are required: sign the contract_hash from your job request with your private key'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `NOT_A_DATA_PROVIDER_ON_CONTRACT` : the caller owns none of the job's datasets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Data provider approves job
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/job/approval/data-provider' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/job/approval/infra-provider:
+    post:
+      tags:
+        - Job Approval
+      summary: Infra Provider Approves Job
+      description: |
+        An infra provider approves a job and signs its contract hash, for the caller's own infrastructures on the job's
+        contract. The signature is stored as submitted and cross-verified at [Check Job Status](#operation/put-job-status).
+
+        `approval` is the caller's own result; `job_approval` is the whole job's.
+      operationId: post-job-approval-infra-provider
+      requestBody:
+        $ref: '#/components/requestBodies/ApprovalBody'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResult'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    job_id: job-7d1e3c9a
+                    type: infra-provider
+                    approval: accepted
+                    data_provider: accepted
+                    infra_provider: accepted
+                    job_approval: accepted
+                    entries:
+                      - id: 42
+                        job_id: job-7d1e3c9a
+                        type: infra-provider
+                        provider_id: provider-ivan
+                        item: infra-azure-cvm-01
+                        status: accepted
+                        has_role: true
+                        in_catalogue: true
+                        checked_at: '2026-10-14T10:25:00Z'
+                    signature:
+                      submitted: true
+                      contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                      items_signed: 1
+                      verified_at: PUT /job/job-7d1e3c9a/status
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : invalid body, or `job_id` missing
+            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `MISSING_FIELDS` : `contract_hash` or `signature` missing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `NOT_AN_INFRA_PROVIDER_ON_CONTRACT` : the caller owns none of the job's infras
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_AN_INFRA_PROVIDER_ON_CONTRACT
+                    message: the token's user owns none of this job's infras
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Infra provider approves job
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/job/approval/infra-provider' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/job/{jobId}/status:
+    put:
+      tags:
+        - Job Approval
+      summary: Check Job Status
+      description: |
+        The job's consumer (the user who generated its contract) cross-verifies the job:
+
+        1. every data and infra provider has approved it, and
+        2. every provider's signature is over the Governance Layer's own hash of the contract and verifies with their
+           registered public key.
+
+        If both hold, the job is `approved` and only then is its **final contract** created
+        (`final_contract_record`). The APD consumer grants for every dataset and infra are then posted.
+        Otherwise `status` is `not approved` with the `reasons`, and nothing is created.
+
+        Can be called again: once approved it re-verifies, returns the same final contract and re-posts the grants.
+      operationId: put-job-status
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - approved
+                      - not approved
+                  reasons:
+                    type: array
+                    items:
+                      type: string
+                    description: Present when `not approved`
+                  contract_hash:
+                    type: string
+                  signatures:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PartySignatureStatus'
+                  grants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GrantResult'
+                  final_contract:
+                    type: boolean
+                  final_contract_record:
+                    $ref: '#/components/schemas/FinalContract'
+                  final_contract_pending:
+                    type: array
+                    items:
+                      type: string
+              examples:
+                Approved:
+                  value:
+                    status: approved
+                    contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                    signatures:
+                      - role: data-provider
+                        provider_id: provider-alice
+                        dataset_name: hospital-admissions-2025
+                        signed: true
+                        valid: true
+                        signer: alice
+                        signed_at: '2026-10-14T10:20:00Z'
+                      - role: infra-provider
+                        provider_id: provider-ivan
+                        infra_id: infra-azure-cvm-01
+                        signed: true
+                        valid: true
+                        signer: ivan
+                        signed_at: '2026-10-14T10:25:00Z'
+                    grants:
+                      - item_type: dataset
+                        item_id: b34eb955-c691-4fd3-b200-f18bc78810a2
+                        policy_id: grant-job-7d1e3c9a-b34eb955
+                        status: posted
+                    final_contract: true
+                    final_contract_record:
+                      job_id: job-7d1e3c9a
+                      contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                      contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                      contract: {}
+                      created_at: '2026-10-14T10:30:00Z'
+                Not approved:
+                  value:
+                    status: not approved
+                    reasons:
+                      - no infra provider has approved yet
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `jobId` missing
+            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `NOT_JOB_CONSUMER` : only the user who generated this job's contract can check its status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_JOB_CONSUMER
+                    message: only the user who generated this job's contract can check its status
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Check job status
+          source: |
+            curl --location --request PUT 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/status' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/job/{jobId}/tee:
+    post:
+      tags:
+        - Jobs
+      summary: Enable Job TEE Run
+      description: |
+        The job's consumer enables the TEE run for an approved job. Every signature on the final contract is re-verified.
+
+        This starts nothing: the run itself is `POST /v1/tee/sessions` with `governanceContractId` set to the returned
+        `contract_id` (see `next`).
+      operationId: post-job-tee
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  job_id:
+                    type: string
+                  contract_id:
+                    type: string
+                  contract_hash:
+                    type: string
+                  tee:
+                    type: string
+                    example: enabled
+                  tee_enabled_at:
+                    type: string
+                    format: date-time
+                  next:
+                    type: string
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    job_id: job-7d1e3c9a
+                    contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                    contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                    tee: enabled
+                    tee_enabled_at: '2026-10-14T10:35:00Z'
+                    next: POST /v1/tee/sessions with governanceContractId = 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `jobId` missing
+            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `NOT_JOB_CONSUMER` : only the user who generated this job's contract can enable its TEE run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          description: |-
+            Conflict
+            - `CONTRACT_NOT_SIGNED` : not every signature on the contract verifies
+            - `CONTRACT_NOT_FINAL` : the contract is not final yet; `PUT /job/{jobId}/status` must return `approved` first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: CONTRACT_NOT_FINAL
+                    message: 'the job''s contract is not final yet: every data and infra provider must approve it, then PUT /job/job-7d1e3c9a/status must return approved'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Enable TEE run
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/tee' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/job/{jobId}/contract/{contractId}:
+    get:
+      tags:
+        - Jobs
+      summary: Get Job Contract
+      description: |
+        Returns a job's stored contract and its `contract_hash`. The stored hash is re-checked against a fresh hash
+        of the stored contract, so a contract edited since is refused.
+
+        Only the job's consumer or one of its data / infra providers may read it.
+      operationId: get-job-contract
+      parameters:
+        - $ref: '#/components/parameters/JobIdParam'
+        - $ref: '#/components/parameters/ContractIdParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  job_id:
+                    type: string
+                  contract_id:
+                    type: string
+                  contract_hash:
+                    type: string
+                  contract:
+                    $ref: '#/components/schemas/Contract'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `jobId` missing
+            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '403':
+          description: |-
+            Forbidden
+            - `NOT_JOB_PARTICIPANT` : only this job's consumer or its data / infra providers can read its contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_JOB_PARTICIPANT
+                    message: only this job's consumer or its data / infra providers can read its contract
+        '404':
+          description: |-
+            Not Found
+            - No contract for this job
+            - `contractId` is not this job's contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: contract_id c-123 is not this job's contract
+        '409':
+          description: |-
+            Conflict
+            - `CONTRACT_HASH_MISMATCH` : the stored contract no longer matches its stored `contract_hash`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get job contract
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/contract/<contractId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/jobs/user/{userId}:
+    get:
+      tags:
+        - Jobs
+      summary: List User Jobs
+      description: |
+        Lists every job (contract) a user takes part in, as its consumer or as a data / infra provider, newest first,
+        with their status on each.
+      operationId: get-user-jobs
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The user's Keycloak user id (`sub`); a username, email or provider id also works
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  user_id:
+                    type: string
+                  count:
+                    type: integer
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserJob'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                    count: 1
+                    jobs:
+                      - job_id: job-7d1e3c9a
+                        contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                        technique: TEE
+                        job_state: final
+                        created_at: '2026-10-14T10:10:00Z'
+                        finalized_at: '2026-10-14T10:30:00Z'
+                        tee_enabled_at: null
+                        participation:
+                          - role: consumer
+                            participant_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            username: bob
+                            status: final
+                            updated_at: '2026-10-14T10:30:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `userId` is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: List user jobs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/user/<userId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/jobs/consumer/{userId}:
+    get:
+      tags:
+        - Jobs
+      summary: List Consumer Jobs
+      description: |
+        Lists the jobs (contracts) the user created, as their consumer, newest first, with their status on each.
+        Only the user's `consumer` entry is in each job's `participation`.
+      operationId: get-consumer-jobs
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The user's Keycloak user id (`sub`); a username, email or provider id also works
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  user_id:
+                    type: string
+                  count:
+                    type: integer
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserJob'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                    count: 1
+                    jobs:
+                      - job_id: job-7d1e3c9a
+                        contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                        technique: TEE
+                        job_state: in_progress
+                        created_at: '2026-10-14T10:10:00Z'
+                        finalized_at: null
+                        tee_enabled_at: null
+                        participation:
+                          - role: consumer
+                            participant_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            username: bob
+                            status: created
+                            updated_at: '2026-10-14T10:10:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `userId` is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: List consumer jobs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/consumer/<userId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/jobs/provider/{userId}:
+    get:
+      tags:
+        - Jobs
+      summary: List Data Provider Requested Jobs
+      description: |
+        Lists the jobs (contracts) the user is requested on as a data provider and has not yet approved or rejected,
+        newest first. Each job's `participation` holds only the user's `data-provider` entries with `status` = `requested`;
+        once they approve or reject the job (`POST /job/approval/data-provider`) it no longer appears. FL sessions are not listed.
+      operationId: get-provider-jobs
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The user's Keycloak user id (`sub`); a username, email or provider id also works
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  user_id:
+                    type: string
+                  count:
+                    type: integer
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserJob'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                    count: 1
+                    jobs:
+                      - job_id: job-7d1e3c9a
+                        contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                        technique: TEE
+                        job_state: in_progress
+                        created_at: '2026-10-14T10:10:00Z'
+                        finalized_at: null
+                        tee_enabled_at: null
+                        participation:
+                          - role: data-provider
+                            participant_id: provider-alice
+                            user_id: ''
+                            username: ''
+                            item_id: ds-1
+                            item_name: Heart Disease Records
+                            status: requested
+                            updated_at: '2026-10-14T10:10:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `userId` is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: List data provider requested jobs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/provider/<userId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/final-models:
+    get:
+      tags:
+        - Final Models
+      summary: List Final Models
+      description: |
+        Lists each FL session's final (highest-round) global model, newest first, plus `latest`, the most recently written one.
+      operationId: get-final-models
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  count:
+                    type: integer
+                  models:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FinalModel'
+                  latest:
+                    type: object
+                    nullable: true
+                    description: The most recently written model; `null` when there are none
+                    allOf:
+                      - $ref: '#/components/schemas/FinalModel'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    count: 1
+                    models:
+                      - session_id: sub-2026-10-14-001
+                        round: 10
+                        file: model_sub-2026-10-14-001_round_10.pt
+                        size_bytes: 4815162
+                        modified_at: '2026-10-14T12:00:00.000Z'
+                    latest:
+                      session_id: sub-2026-10-14-001
+                      round: 10
+                      file: model_sub-2026-10-14-001_round_10.pt
+                      size_bytes: 4815162
+                      modified_at: '2026-10-14T12:00:00.000Z'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: List final models
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/final-models'
+
+  /api/v1/final-model/download:
+    get:
+      tags:
+        - Final Models
+      summary: Download Final Model
+      description: |
+        Downloads a global model checkpoint (`.pt`, or `.weights` for non-PyTorch backends).
+        `session_id` defaults to the newest session; `round` defaults to that session's final round.
+      operationId: get-final-model-download
+      parameters:
+        - $ref: '#/components/parameters/ModelSessionParam'
+        - $ref: '#/components/parameters/ModelRoundParam'
+      responses:
+        '200':
+          description: OK
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: attachment; filename="model_<session_id>_round_<round>.pt"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/ModelBadRequest'
+        '404':
+          $ref: '#/components/responses/NoModel'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Download final model
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/final-model/download?session_id=<sessionId>' \
+              --output model.pt
+
+  /api/v1/final-model/summary:
+    get:
+      tags:
+        - Final Models
+      summary: Get Final Model Summary
+      description: |
+        A readable JSON view of a model checkpoint (layers, shapes, dtypes, total parameters, sample weights),
+        so a model can be inspected without downloading it. Same `session_id` / `round` defaults as
+        [Download Final Model](#operation/get-final-model-download).
+      operationId: get-final-model-summary
+      parameters:
+        - $ref: '#/components/parameters/ModelSessionParam'
+        - $ref: '#/components/parameters/ModelRoundParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  session_id:
+                    type: string
+                  round:
+                    type: integer
+                  file:
+                    type: string
+                  summary:
+                    type: object
+                    additionalProperties: true
+                    description: The model inspector's output
+        '400':
+          $ref: '#/components/responses/ModelBadRequest'
+        '404':
+          $ref: '#/components/responses/NoModel'
+        '500':
+          description: |-
+            Internal Server Error
+            - `PARSE_FAILED` : the checkpoint could not be inspected
+            - `INTERNAL_ERROR`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get final model summary
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/final-model/summary?session_id=<sessionId>&round=10'
+
+  /api/v1/vm-registry:
+    post:
+      tags:
+        - VM Registry
+      summary: Register Participant VM
+      description: |
+        Registers (or updates) a participant VM's IP address. Called by the participant-VM provisioning right after
+        it creates each VM.
+
+        * `role` `user` is the output owner's VM; `data-provider` is a data provider's VM.
+      operationId: post-vm-registry
+      requestBody:
+        description: |
+          - `role` : `data-provider` or `user`
+          - `participant_name` : The participant the VM belongs to
+          - `ip_address` : The VM's IP address
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum:
+                    - data-provider
+                    - user
+                participant_name:
+                  type: string
+                ip_address:
+                  type: string
+              required:
+                - role
+                - participant_name
+                - ip_address
+            examples:
+              Register VM:
+                value:
+                  role: data-provider
+                  participant_name: alice
+                  ip_address: 10.0.4.17
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+        '400':
+          description: |-
+            Bad Request
+            - `INVALID_ROLE` : `role` is not `data-provider` or `user`
+            - `MISSING_FIELDS` : `participant_name` or `ip_address` missing
+            - `INVALID_JSON` : the body is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: INVALID_ROLE
+                    message: role must be "data-provider" or "user"
+        '401':
+          $ref: '#/components/responses/VMRegistryUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - vmRegistryToken: []
+      x-codeSamples:
+        - lang: cURL
+          label: Register VM
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/vm-registry' \
+              --header 'X-VM-Registry-Token: <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
+  /api/v1/vm-registry/output-owner:
+    get:
+      tags:
+        - VM Registry
+      summary: Get Output Owner VM
+      description: |
+        Returns the most recently registered output-owner VM. A data provider's VM provisioning uses it to find the
+        FL broker host.
+      operationId: get-vm-registry-output-owner
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  vm:
+                    $ref: '#/components/schemas/VMRegistryEntry'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    vm:
+                      role: user
+                      participant_name: bob
+                      ip_address: 10.0.4.10
+                      updated_at: '2026-10-14T09:00:00Z'
+        '401':
+          $ref: '#/components/responses/VMRegistryUnauthorized'
+        '404':
+          description: |-
+            Not Found
+            - No output-owner VM registered yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+              examples:
+                Example:
+                  value:
+                    status: FAILED
+                    error: NOT_FOUND
+                    message: no output-owner VM registered yet
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - vmRegistryToken: []
+      x-codeSamples:
+        - lang: cURL
+          label: Get output owner VM
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/vm-registry/output-owner' \
+              --header 'X-VM-Registry-Token: <tokenValue>'
+
+  /api/v1/vm-registry/data-providers:
+    get:
+      tags:
+        - VM Registry
+      summary: List Data Provider VMs
+      description: |
+        Returns every registered data-provider VM.
+      operationId: get-vm-registry-data-providers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  vms:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VMRegistryEntry'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    vms:
+                      - role: data-provider
+                        participant_name: alice
+                        ip_address: 10.0.4.17
+                        updated_at: '2026-10-14T09:05:00Z'
+        '401':
+          $ref: '#/components/responses/VMRegistryUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - vmRegistryToken: []
+      x-codeSamples:
+        - lang: cURL
+          label: List data provider VMs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/vm-registry/data-providers' \
+              --header 'X-VM-Registry-Token: <tokenValue>'
+
+components:
+  securitySchemes:
+    authorization:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak issued Bearer token
+    vmRegistryToken:
+      type: apiKey
+      in: header
+      name: X-VM-Registry-Token
+      description: Shared secret; only checked when the deployment sets `VM_REGISTRY_TOKEN`
+  parameters:
+    RoleParam:
+      name: role
+      in: path
+      required: true
+      description: The provider role the caller holds
+      schema:
+        type: string
+        enum:
+          - data-provider
+          - infra-provider
+    NotificationIdParam:
+      name: key
+      in: path
+      required: true
+      description: The notification's id
+      schema:
+        type: string
+    SessionIdParam:
+      name: sessionId
+      in: path
+      required: true
+      description: The FL session (submission) id
+      schema:
+        type: string
+    ContractIdParam:
+      name: contractId
+      in: path
+      required: true
+      description: The contract's id
+      schema:
+        type: string
+    JobIdParam:
+      name: jobId
+      in: path
+      required: true
+      description: The job's id (from Generate Contract)
+      schema:
+        type: string
+    ModelSessionParam:
+      name: session_id
+      in: query
+      required: false
+      description: The FL session; defaults to the newest session
+      schema:
+        type: string
+        pattern: ^[a-zA-Z0-9_-]+$
+    ModelRoundParam:
+      name: round
+      in: query
+      required: false
+      description: The round; defaults to the session's final round
+      schema:
+        type: integer
+        minimum: 0
+  requestBodies:
+    ApprovalBody:
+      description: |
+        - `job_id` : The job to approve
+        - `contract_hash` : The hash from the job request
+        - `signature` : The provider's base64 RSA signature (RSASSA-PKCS1-v1_5, SHA-256) over `contract_hash`
+        - `provider_comment`, `feedback_to_consumer` : Optional, data provider only; copied into their IUDX policies
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              job_id:
+                type: string
+              contract_hash:
+                type: string
+              signature:
+                type: string
+              provider_comment:
+                type: string
+              feedback_to_consumer:
+                type: string
+            required:
+              - job_id
+              - contract_hash
+              - signature
+          examples:
+            Approve Job:
+              value:
+                job_id: job-7d1e3c9a
+                contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
+                signature: kX9v2Lq...Q==
+  responses:
+    InternalError:
+      description: Internal Server Error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: INTERNAL_ERROR
+    InvalidJSON:
+      description: |-
+        Bad Request
+        - `INVALID_JSON` : the body is not valid JSON
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: INVALID_JSON
+                message: Invalid JSON in request body
+    NotFound:
+      description: Not Found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: NOT_FOUND
+    ContractNotFound:
+      description: |-
+        Not Found
+        - No such contract
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: CONTRACT_NOT_FOUND
+    JobNotFound:
+      description: |-
+        Not Found
+        - No contract for this `job_id`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: NOT_FOUND
+                message: No contract for this job_id
+    ProviderTokenUnauthorized:
+      description: |-
+        Unauthorized
+        - `MISSING_AUTH_TOKEN` : no Bearer token
+        - `INVALID_OR_EXPIRED_TOKEN` : the token is invalid or expired
+        - `INVALID_TOKEN_CLAIMS` : the token has no username or `sub`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: INVALID_OR_EXPIRED_TOKEN
+    DevTokenUnauthorized:
+      description: |-
+        Unauthorized
+        - `MISSING_AUTH_TOKEN` : no Bearer token
+        - `INVALID_OR_EXPIRED_TOKEN` : the token is not a valid DX Keycloak token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: MISSING_AUTH_TOKEN
+                message: send the consumer's dev Keycloak token as the Bearer token
+    VMRegistryUnauthorized:
+      description: |-
+        Unauthorized
+        - `UNAUTHORIZED` : `X-VM-Registry-Token` is missing or wrong
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: UNAUTHORIZED
+                message: invalid or missing X-VM-Registry-Token
+    ContractResult:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                example: SUCCESS
+              contract:
+                $ref: '#/components/schemas/Contract'
+    SignatureStatus:
+      description: OK
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              signatures:
+                type: string
+                enum:
+                  - matching
+                  - not matching
+              tee:
+                type: string
+                enum:
+                  - can run
+                  - cannot run
+          examples:
+            All signed:
+              value:
+                signatures: matching
+                tee: can run
+            Not all signed:
+              value:
+                signatures: not matching
+                tee: cannot run
+    ModelBadRequest:
+      description: |-
+        Bad Request
+        - `INVALID_SESSION_ID` : `session_id` has characters other than letters, digits, `-` and `_`
+        - `INVALID_ROUND` : `round` is not a non-negative integer
+        - `INVALID_PATH`
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: INVALID_ROUND
+    NoModel:
+      description: |-
+        Not Found
+        - `NO_MODEL` : no checkpoints yet, or none for that session / round
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Failed'
+          examples:
+            Example:
+              value:
+                status: FAILED
+                error: NO_MODEL
+                message: No model for that session.
+  schemas:
+    Failed:
+      type: object
+      properties:
+        status:
+          type: string
+          example: FAILED
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+        detail:
+          type: string
+    DataProvider:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        recipient_id:
+          type: string
+        recipient_username:
+          type: string
+        sender_username:
+          type: string
+        message:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        read:
+          type: boolean
+        read_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        response:
+          type: string
+          nullable: true
+          enum:
+            - accepted
+            - declined
+            - null
+          description: '`null` until the recipient answers'
+        response_message:
+          type: string
+          nullable: true
+        responded_at:
+          type: string
+          format: date-time
+          nullable: true
+    CreatedNotification:
+      type: object
+      properties:
+        id:
+          type: string
+        recipientId:
+          type: string
+        recipientUsername:
+          type: string
+        senderUsername:
+          type: string
+        message:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        read:
+          type: boolean
+        created_at:
+          type: string
+    NotificationList:
+      type: object
+      properties:
+        status:
+          type: string
+          example: SUCCESS
+        notifications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+    NotificationResult:
+      type: object
+      properties:
+        status:
+          type: string
+          example: SUCCESS
+        notification:
+          $ref: '#/components/schemas/Notification'
+    Project:
+      type: object
+      properties:
+        project_id:
+          type: string
+        session_id:
+          type: string
+        data_provider_usernames:
+          type: array
+          items:
+            type: string
+    Signature:
+      type: object
+      properties:
+        signed_at:
+          type: string
+          format: date-time
+          nullable: true
+        signer:
+          type: string
+          description: Username whose public key verifies `value`
+        algorithm:
+          type: string
+          example: RSASSA-PKCS1-v1_5-SHA256
+        signed_hash:
+          type: string
+          description: The contract hash that was signed
+        value:
+          type: string
+          description: base64 signature
+    Constraints:
+      type: object
+      properties:
+        accessibility_level:
+          type: string
+        restricted_to:
+          type: array
+          items:
+            type: string
+    Contract:
+      type: object
+      description: The contract shared by FL, TEE and SMPC.
+      properties:
+        project_id:
+          type: string
+        contract_id:
+          type: string
+        job_id:
+          type: string
+        version:
+          type: integer
+        lifecycle:
+          type: object
+          properties:
+            created_at:
+              type: string
+              format: date-time
+            valid_from:
+              type: string
+              format: date-time
+            valid_until:
+              type: string
+              format: date-time
+        technique:
+          type: string
+          enum:
+            - FL
+            - TEE
+            - SMPC
+        compute_choice:
+          type: string
+        parties:
+          type: object
+          properties:
+            user:
+              type: object
+              description: The consumer
+              properties:
+                id:
+                  type: string
+                name:
+                  type: string
+                datablob_url:
+                  type: string
+                signature:
+                  $ref: '#/components/schemas/Signature'
+            data_providers:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  dataset_id:
+                    type: string
+                  dataset_name:
+                    type: string
+                  dataset_version:
+                    type: string
+                  data_url:
+                    type: string
+                  constraints:
+                    $ref: '#/components/schemas/Constraints'
+                  trustee:
+                    type: object
+                    properties:
+                      kbs_url:
+                        type: string
+                      key_resource_path:
+                        type: string
+                  signature:
+                    $ref: '#/components/schemas/Signature'
+            data_provider_count:
+              type: integer
+            application_providers:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  app_name:
+                    type: string
+                  container_image:
+                    type: string
+                  container_digest:
+                    type: string
+                  constraints:
+                    $ref: '#/components/schemas/Constraints'
+                  signature:
+                    $ref: '#/components/schemas/Signature'
+            infra_providers:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  region:
+                    type: string
+                  attestation:
+                    type: object
+                    properties:
+                      required:
+                        type: boolean
+                      service:
+                        type: string
+                      policy_id:
+                        type: string
+                  resource_allocation:
+                    type: object
+                    properties:
+                      cpu_cores:
+                        type: integer
+                      ram_mb:
+                        type: integer
+                      gpu:
+                        type: string
+                      sgx_enabled:
+                        type: boolean
+                      tdx_enabled:
+                        type: boolean
+                      sev_snp_enabled:
+                        type: boolean
+                      sev_enabled:
+                        type: boolean
+                      nitro_enclave_enabled:
+                        type: boolean
+                  constraints:
+                    $ref: '#/components/schemas/Constraints'
+                  signature:
+                    $ref: '#/components/schemas/Signature'
+            infra_provider_count:
+              type: integer
+        session_info:
+          type: object
+          properties:
+            id:
+              type: string
+            session_id:
+              type: string
+            requested_by:
+              type: string
+        contract_hash:
+          type: string
+        governance_signature:
+          $ref: '#/components/schemas/Signature'
+    SignResult:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - signed
+            - not signed
+        message:
+          type: string
+    AuditEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        job_id:
+          type: string
+        type:
+          type: string
+          enum:
+            - data-provider
+            - infra-provider
+        provider_id:
+          type: string
+        item:
+          type: string
+          description: The dataset or infra id
+        status:
+          type: string
+          enum:
+            - accepted
+            - rejected
+        has_role:
+          type: boolean
+        in_catalogue:
+          type: boolean
+        reason:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+    ApprovalResult:
+      type: object
+      properties:
+        status:
+          type: string
+          example: SUCCESS
+        job_id:
+          type: string
+        type:
+          type: string
+          enum:
+            - data-provider
+            - infra-provider
+        approval:
+          type: string
+          enum:
+            - accepted
+            - rejected
+            - pending
+          description: The caller's own result
+        data_provider:
+          type: string
+          enum:
+            - accepted
+            - rejected
+            - pending
+        infra_provider:
+          type: string
+          enum:
+            - accepted
+            - rejected
+            - pending
+        job_approval:
+          type: string
+          description: The whole job's result
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntry'
+        signature:
+          type: object
+          properties:
+            submitted:
+              type: boolean
+            contract_hash:
+              type: string
+            items_signed:
+              type: integer
+            verified_at:
+              type: string
+            verified:
+              type: boolean
+              description: Data provider only; the signature was verified before recording
+    GrantResult:
+      type: object
+      properties:
+        item_type:
+          type: string
+          enum:
+            - dataset
+            - infra
+        item_id:
+          type: string
+        policy_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - posted
+            - failed
+        error:
+          type: string
+    IudxPolicyResult:
+      type: object
+      properties:
+        item_id:
+          type: string
+        policy_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - posted
+            - failed
+        error:
+          type: string
+    PartySignatureStatus:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+            - data-provider
+            - infra-provider
+        provider_id:
+          type: string
+        dataset_name:
+          type: string
+        infra_id:
+          type: string
+        signed:
+          type: boolean
+        valid:
+          type: boolean
+        signer:
+          type: string
+        signed_at:
+          type: string
+          format: date-time
+        error:
+          type: string
+    FinalContract:
+      type: object
+      nullable: true
+      properties:
+        job_id:
+          type: string
+        contract_id:
+          type: string
+        contract_hash:
+          type: string
+        contract:
+          $ref: '#/components/schemas/Contract'
+        created_at:
+          type: string
+          format: date-time
+    UserJob:
+      type: object
+      properties:
+        job_id:
+          type: string
+        contract_id:
+          type: string
+        technique:
+          type: string
+        job_state:
+          type: string
+          enum:
+            - in_progress
+            - final
+            - tee_enabled
+        created_at:
+          type: string
+          format: date-time
+        finalized_at:
+          type: string
+          format: date-time
+          nullable: true
+        tee_enabled_at:
+          type: string
+          format: date-time
+          nullable: true
+        participation:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum:
+                  - consumer
+                  - data-provider
+                  - infra-provider
+              participant_id:
+                type: string
+              user_id:
+                type: string
+              username:
+                type: string
+              item_id:
+                type: string
+              item_name:
+                type: string
+              status:
+                type: string
+                enum:
+                  - created
+                  - requested
+                  - approved
+                  - rejected
+                  - signed
+                  - final
+                  - tee_enabled
+              updated_at:
+                type: string
+                format: date-time
+    FinalModel:
+      type: object
+      properties:
+        session_id:
+          type: string
+        round:
+          type: integer
+        file:
+          type: string
+        size_bytes:
+          type: integer
+        modified_at:
+          type: string
+          format: date-time
+    VMRegistryEntry:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+            - data-provider
+            - user
+        participant_name:
+          type: string
+        ip_address:
+          type: string
+        updated_at:
+          type: string

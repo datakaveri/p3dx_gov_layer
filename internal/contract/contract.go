@@ -109,6 +109,29 @@ type ApplicationProviderParty struct {
 
 // Attestation describes the remote-attestation requirement for an infra
 // provider's compute environment.
+// Workload is what the TEE runs for the selected workload (see
+// services.KnownWorkloads): its image and CPU/memory request, as Kubernetes
+// quantities (e.g. "250m"/"512Mi").
+type Workload struct {
+	Image     string            `json:"image"`
+	Resources WorkloadResources `json:"resources"`
+	// Env is passed to the workload container: DATASET_URL (the first
+	// dataset's data_url) and RESULT_URL (the consumer's datablob_url).
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// JobTrustee is the contract-level trustee the TEE job uses — the first
+// dataset's trustee, in the coordinator's camelCase CreateJob shape.
+type JobTrustee struct {
+	KBSURL          string `json:"kbsUrl"`
+	KeyResourcePath string `json:"keyResourcePath"`
+}
+
+type WorkloadResources struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
 type Attestation struct {
 	Required bool   `json:"required"`
 	Service  string `json:"service"`
@@ -186,6 +209,13 @@ type Contract struct {
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`
 	ComputeChoice string      `json:"compute_choice"`
+	// Workload is set when a known workload (e.g. MNIST) was selected.
+	// omitempty keeps older contracts' hashes stable.
+	Workload *Workload `json:"workload,omitempty"`
+	// Trustee and CallbackURL complete the coordinator's CreateJob shape
+	// (contractId/workload/trustee/callbackUrl). Set only alongside Workload.
+	Trustee     *JobTrustee `json:"trustee,omitempty"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
 	Parties       Parties     `json:"parties"`
 	SessionInfo   SessionInfo `json:"session_info"`
 	ContractHash  string      `json:"contract_hash,omitempty"`
@@ -243,4 +273,43 @@ func withoutSignatures(c Contract) Contract {
 	c.Parties.InfraProviders = infraProviders
 
 	return c
+}
+
+// SubContract is the slice of a contract the Kata coordinator runs — the
+// body of CoordinatorService/CreateJob ({"contract": {...}}), in its
+// camelCase JSON shape.
+type SubContract struct {
+	Contract SubContractBody `json:"contract"`
+}
+
+type SubContractBody struct {
+	ContractID  string      `json:"contractId"`
+	Workload    *Workload   `json:"workload"`
+	Trustee     *JobTrustee `json:"trustee"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
+}
+
+// NewSubContract builds the CreateJob sub-contract from c. missing names
+// every required field c lacks; when it is non-empty the job must not be
+// sent.
+func NewSubContract(c *Contract) (sub SubContract, missing []string) {
+	if c.ContractID == "" {
+		missing = append(missing, "contract_id")
+	}
+	if c.Workload == nil || c.Workload.Image == "" {
+		missing = append(missing, "workload.image")
+	}
+	if c.Workload == nil || c.Workload.Env["DATASET_URL"] == "" {
+		missing = append(missing, "workload.env.DATASET_URL")
+	}
+	if c.Trustee == nil || c.Trustee.KBSURL == "" || c.Trustee.KeyResourcePath == "" {
+		missing = append(missing, "trustee")
+	}
+	sub.Contract = SubContractBody{
+		ContractID:  c.ContractID,
+		Workload:    c.Workload,
+		Trustee:     c.Trustee,
+		CallbackURL: c.CallbackURL,
+	}
+	return sub, missing
 }

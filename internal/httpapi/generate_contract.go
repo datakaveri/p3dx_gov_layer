@@ -112,6 +112,11 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 			if url, ok := policy["data_url"].(string); ok {
 				in.DataURL = url
 			}
+			if rules, ok := policy["rules"].(map[string]interface{}); ok {
+				if path, ok := rules["key_resource_path"].(string); ok {
+					in.KeyResourcePath = strings.TrimSpace(path)
+				}
+			}
 			if req.ProviderID != "" {
 				in.ProviderID = req.ProviderID
 				in.ProviderName = lookupProvider(req.ProviderID).Name
@@ -205,6 +210,8 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		ConsumerName:  services.ConsumerDisplayName(claims),
 		Form:          form,
 		KBSURL:        s.cfg.KBSURL,
+		ResultURL:     s.cfg.DefaultResultURL,
+		CallbackURL:   s.cfg.ContractCallbackURL,
 
 		Infras: infraInputs,
 	})

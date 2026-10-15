@@ -1,81 +1,26 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Governance Layer APIs</title>
-  <style>
-    :root {
-      --bg: #f6f7fb; --card: #ffffff; --text: #1d2433; --muted: #5b6475;
-      --border: #e2e5ee; --accent: #3b5bdb; --code-bg: #f0f2f7;
-      --get: #2b8a3e; --post: #1c7ed6; --put: #e67700; --patch: #ae3ec9; --delete: #e03131;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #12151c; --card: #1a1e27; --text: #e4e7ee; --muted: #9aa3b5;
-        --border: #2b3140; --accent: #748ffc; --code-bg: #232836;
-        --get: #51cf66; --post: #4dabf7; --put: #ffa94d; --patch: #da77f2; --delete: #ff6b6b;
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--text);
-      font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    }
-    header { padding: 24px 16px 0; max-width: 1200px; margin: 0 auto; }
-    header h1 { margin: 0 0 4px; font-size: 22px; }
-    header p { margin: 0; color: var(--muted); }
-    main { max-width: 1200px; margin: 0 auto; padding: 16px; }
-    article {
-      background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-      padding: 8px 24px 24px; overflow-x: auto;
-    }
-    article h1 { font-size: 20px; }
-    article h2 { font-size: 17px; margin-top: 32px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
-    table { border-collapse: collapse; width: 100%; font-size: 14px; }
-    th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    td:nth-child(2) { white-space: nowrap; }
-    code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
-    pre { background: var(--code-bg); padding: 12px; border-radius: 6px; overflow-x: auto; }
-    pre code { padding: 0; background: none; }
-    .method {
-      display: inline-block; min-width: 58px; text-align: center; padding: 2px 6px; border-radius: 4px;
-      font: 700 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: #fff; background: var(--muted);
-    }
-    .method.GET { background: var(--get); } .method.POST { background: var(--post); }
-    .method.PUT { background: var(--put); } .method.PATCH { background: var(--patch); }
-    .method.DELETE { background: var(--delete); }
-    .error { color: var(--delete); }
-  </style>
+    <title>DX Governance Layer API Docs</title>
+    <!-- needed for adaptive design -->
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet">
+
+    <!--
+    ReDoc doesn't change outer page styles
+    -->
+    <style>
+      body { margin: 0; padding: 0; }
+    </style>
 </head>
 <body>
-  <header>
-    <h1>Governance Layer APIs</h1>
-    <p>Endpoint specs for <code>p3dx_gov_layer</code>.</p>
-  </header>
-  <main><article id="doc">Loading&hellip;</article></main>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-  <script>
-    const docEl = document.getElementById("doc");
-
-    async function show(name) {
-      try {
-        const res = await fetch("/apis/" + name + ".md");
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        docEl.innerHTML = marked.parse(await res.text());
-        // Turn `GET`/`POST`/... in a table's first column into method badges.
-        docEl.querySelectorAll("td:first-child code").forEach((c) => {
-          const m = c.textContent.trim();
-          if (/^(GET|POST|PUT|PATCH|DELETE)$/.test(m)) c.outerHTML = '<span class="method ' + m + '">' + m + "</span>";
-        });
-      } catch (err) {
-        docEl.innerHTML = '<p class="error">Could not load ' + name + ": " + err.message + "</p>";
-      }
-    }
-
-    show("governance-layer");
-  </script>
+<div id="redoc"></div>
+<script src="https://cdn.jsdelivr.net/npm/redoc@2.1.5/bundles/redoc.standalone.js"></script>
+<script>
+  // Spec URL relative to the page's own path, so it still resolves behind an
+  // ingress prefix (e.g. /gov-layer/apis -> /gov-layer/apis/spec).
+  Redoc.init(location.pathname.replace(/\/$/, "") + "/spec", {}, document.getElementById("redoc"));
+</script>
 </body>
 </html>

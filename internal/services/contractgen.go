@@ -18,6 +18,10 @@ type DatasetInput struct {
 	ProviderID   string
 	IsPrivate    bool   // from the APD policy's is_private flag, if one was found
 	DataURL      string // from the APD policy's data_url field, if one was found
+	// KeyResourcePath is the APD policy's rules.key_resource_path (PolicyForm's
+	// "Key Resource Path" field), if the provider set one. Blank falls back to
+	// the path NewTrustee derives from the dataset name/id.
+	KeyResourcePath string
 }
 
 // InfraInput carries what's known about one selected infrastructure
@@ -56,6 +60,8 @@ type GenerateContractInput struct {
 	ConsumerName  string
 	Form          map[string]interface{} // provider form data, if FetchDatasetForm found one
 	KBSURL        string                 // KBS_URL; each dataset's trustee block, when set
+	ResultURL     string                 // DEFAULT_RESULT_URL; the consumer's datablob_url
+	CallbackURL   string                 // CONTRACT_CALLBACK_URL; "/<contract_id>" is appended
 
 	// Infrastructure Catalogue (InfraCat) selection — SMPC only. Exactly two
 	// elements once populated by the caller.
@@ -103,20 +109,26 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 			DatasetVersion: "v1",
 			DataURL:        d.DataURL,
 			Constraints:    contract.Constraints{AccessibilityLevel: accessibilityLevel, RestrictedTo: []string{}},
-			Trustee:        contract.NewTrustee(in.KBSURL, d.DatasetName, d.DatasetID),
+			Trustee:        trusteeFor(in.KBSURL, d),
 		})
 	}
 	_ = in.Form // data_size_bytes etc. aren't part of this schema; kept for future use
 
 	applicationProviders := []contract.ApplicationProviderParty{}
+	var workload *contract.Workload
 	appID := in.ApplicationID
 	if appID != "" {
-		applicationProviders = append(applicationProviders, contract.ApplicationProviderParty{
+		app := contract.ApplicationProviderParty{
 			ID:          appID,
 			Name:        "Unknown Application Provider",
 			AppName:     appID,
 			Constraints: contract.Constraints{AccessibilityLevel: "PUBLIC", RestrictedTo: []string{}},
-		})
+		}
+		if w, ok := KnownWorkloads[appID]; ok {
+			app.ContainerImage = w.Image
+			workload = &contract.Workload{Image: w.Image, Resources: w.Resources}
+		}
+		applicationProviders = append(applicationProviders, app)
 	}
 
 	// Real infra selections (SMPC, via InfraCat) yield real parties built
@@ -180,10 +192,12 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		},
 		Technique:     in.Technique,
 		ComputeChoice: computeChoice,
+		Workload:      workload,
 		Parties: contract.Parties{
 			User: contract.UserParty{
-				ID:   in.ConsumerID,
-				Name: in.ConsumerName,
+				ID:          in.ConsumerID,
+				Name:        in.ConsumerName,
+				DatablobURL: in.ResultURL,
 			},
 			DataProviders:        dataProviders,
 			DataProviderCount:    len(dataProviders),
@@ -196,9 +210,42 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		},
 	}
 
+	// Known workload (TEE): complete the coordinator's CreateJob shape —
+	// workload.env, a contract-level trustee, and callbackUrl.
+	if c.Workload != nil {
+		env := map[string]string{}
+		if len(dataProviders) > 0 && dataProviders[0].DataURL != "" {
+			env["DATASET_URL"] = dataProviders[0].DataURL
+		}
+		if in.ResultURL != "" {
+			env["RESULT_URL"] = in.ResultURL
+		}
+		if len(env) > 0 {
+			c.Workload.Env = env
+		}
+		if len(dataProviders) > 0 && dataProviders[0].Trustee != nil {
+			t := dataProviders[0].Trustee
+			c.Trustee = &contract.JobTrustee{KBSURL: t.KBSURL, KeyResourcePath: t.KeyResourcePath}
+		}
+		if in.CallbackURL != "" {
+			c.CallbackURL = in.CallbackURL + "/" + c.ContractID
+		}
+	}
+
 	if hash, err := contract.ComputeHash(c); err == nil {
 		c.ContractHash = hash
 	}
 
 	return c
+}
+
+// trusteeFor builds one dataset's trustee block: the KBS URL is always the
+// gov_layer-wide KBS_URL, while the key resource path is the provider's own
+// (from its APD policy) when set, else NewTrustee's derived default.
+func trusteeFor(kbsURL string, d DatasetInput) *contract.Trustee {
+	t := contract.NewTrustee(kbsURL, d.DatasetName, d.DatasetID)
+	if t != nil && d.KeyResourcePath != "" {
+		t.KeyResourcePath = d.KeyResourcePath
+	}
+	return t
 }
