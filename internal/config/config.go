@@ -151,6 +151,15 @@ type Config struct {
 	// "trustee" block points at (contract.NewTrustee). Blank omits the block.
 	KBSURL string // KBS_URL
 
+	// DefaultResultURL is where the TEE workload writes its result — the
+	// default for every generated contract's parties.user.datablob_url
+	// (relayed to the workload as RESULT_URL). Blank leaves it empty.
+	DefaultResultURL string // DEFAULT_RESULT_URL
+
+	// ContractCallbackURL is the base of a TEE contract's callbackUrl;
+	// "/<contract_id>" is appended. Blank leaves callbackUrl out.
+	ContractCallbackURL string // CONTRACT_CALLBACK_URL
+
 	// --- IUDX APD policy, posted per accepted dataset at
 	// POST /job/approval/data-provider with the data provider's own token.
 	// Blank IUDXAPDPolicyURL skips it.
@@ -269,6 +278,10 @@ func Load() *Config {
 		RequireInfraApproval: getEnvBool("REQUIRE_INFRA_APPROVAL", true),
 
 		KBSURL: strings.TrimRight(os.Getenv("KBS_URL"), "/"),
+
+		DefaultResultURL: strings.TrimSpace(os.Getenv("DEFAULT_RESULT_URL")),
+
+		ContractCallbackURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CONTRACT_CALLBACK_URL")), "/"),
 
 		IUDXAPDPolicyURL:      os.Getenv("IUDX_APD_POLICY_URL"),
 		IUDXPolicyCallbackURL: os.Getenv("IUDX_POLICY_CALLBACK_URL"),

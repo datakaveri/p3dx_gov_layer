@@ -50,11 +50,15 @@ info:
     The `X-VM-Registry-Token` header is only checked when the deployment sets `VM_REGISTRY_TOKEN`.
 
     # Job flow (TEE / SMPC with datasets and infra)
-    1. Each provider registers their public key: `PUT /provider-keys/{role}`
+    1. Each provider registers their public key: `PUT /provider-keys/{role}`, and can check it is registered: `GET /provider-keys/{role}/status`
     2. The consumer generates the contract: `POST /generate-contract` (returns `job_id`, `contract_id` and `contract_hash`)
-    3. Each data provider and infra provider approves the job and signs the `contract_hash`: `POST /job/approval/data-provider`, `POST /job/approval/infra-provider`
-    4. The consumer cross-verifies the approvals and signatures, which makes the contract final: `PUT /job/{jobId}/status`
-    5. The consumer enables the TEE run: `POST /job/{jobId}/tee`
+    3. Each data provider and infra provider lists the jobs requested from them: `GET /jobs/user/{userId}` (their `participation` entry has `status` = `requested`), and gets the contract and its `contract_hash`: `GET /job/{jobId}/contract/{contractId}`
+    4. Each data provider and infra provider approves the job and signs the `contract_hash`: `POST /job/approval/data-provider`, `POST /job/approval/infra-provider`
+    5. The consumer can check which providers have signed: `GET /contracts/{contractId}/signatures`
+    6. The consumer cross-verifies the approvals and signatures, which makes the contract final: `PUT /job/{jobId}/status`
+    7. The consumer enables the TEE run: `POST /job/{jobId}/tee`
+
+    The consumer can list their own jobs and see each one's status at any point: `GET /jobs/user/{userId}`.
 
     # API HTTP Responses
      Apart from the response codes specified in each API, the API server may respond with certain 4xx and 5xx error codes which are related to common API Gateway behaviours.

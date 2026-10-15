@@ -109,6 +109,29 @@ type ApplicationProviderParty struct {
 
 // Attestation describes the remote-attestation requirement for an infra
 // provider's compute environment.
+// Workload is what the TEE runs for the selected workload (see
+// services.KnownWorkloads): its image and CPU/memory request, as Kubernetes
+// quantities (e.g. "250m"/"512Mi").
+type Workload struct {
+	Image     string            `json:"image"`
+	Resources WorkloadResources `json:"resources"`
+	// Env is passed to the workload container: DATASET_URL (the first
+	// dataset's data_url) and RESULT_URL (the consumer's datablob_url).
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// JobTrustee is the contract-level trustee the TEE job uses — the first
+// dataset's trustee, in the coordinator's camelCase CreateJob shape.
+type JobTrustee struct {
+	KBSURL          string `json:"kbsUrl"`
+	KeyResourcePath string `json:"keyResourcePath"`
+}
+
+type WorkloadResources struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
 type Attestation struct {
 	Required bool   `json:"required"`
 	Service  string `json:"service"`
@@ -186,6 +209,13 @@ type Contract struct {
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`
 	ComputeChoice string      `json:"compute_choice"`
+	// Workload is set when a known workload (e.g. MNIST) was selected.
+	// omitempty keeps older contracts' hashes stable.
+	Workload *Workload `json:"workload,omitempty"`
+	// Trustee and CallbackURL complete the coordinator's CreateJob shape
+	// (contractId/workload/trustee/callbackUrl). Set only alongside Workload.
+	Trustee     *JobTrustee `json:"trustee,omitempty"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
 	Parties       Parties     `json:"parties"`
 	SessionInfo   SessionInfo `json:"session_info"`
 	ContractHash  string      `json:"contract_hash,omitempty"`
