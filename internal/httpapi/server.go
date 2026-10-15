@@ -126,7 +126,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// provider posts their RSA signature over a contract's hash; the
 	// signatures routes report who has signed (FL looks it up by session).
 	r.Post("/contracts/{contractId}/sign", s.handleSignContract)
+	r.Post("/contracts/{contractId}/withdraw-consent", s.handleWithdrawConsent)
 	r.Get("/contracts/{contractId}/signatures", s.getContractSignatures)
+	// Consumer edit of a TEE contract, in place and unsigned
+	// (contract_edit.go) — the run gate then refuses it.
+	r.Put("/contracts/{contractId}", s.editContract)
+	// Workload catalogue (workloads_catalog.go) for the UI's pickers.
+	r.Get("/workloads", s.listWorkloads)
 	r.Get("/contracts/by-session/{sessionId}/signatures", s.getSessionContractSignatures)
 
 	// Job approvals (job_approval.go): role + catalogue checks for every

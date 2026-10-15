@@ -26,6 +26,7 @@ const (
 	ParticipantStatusSigned     = "signed"
 	ParticipantStatusFinal      = "final"
 	ParticipantStatusTEEEnabled = "tee_enabled"
+	ParticipantStatusWithdrawn  = "withdrawn" // provider: withdrew consent after signing (DPDP s.6(4))
 )
 
 // JobParticipant is one row of job_participants: one user's part in one job

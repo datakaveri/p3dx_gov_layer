@@ -107,6 +107,12 @@ func (s *Server) markApprovalParticipants(ctx context.Context, kind, jobID strin
 
 // markSignedParticipant records providerID's datasets on c as signed.
 func (s *Server) markSignedParticipant(ctx context.Context, c *contract.Contract, providerID, userID, username string) {
+	s.markParticipantStatus(ctx, c, providerID, userID, username, db.ParticipantStatusSigned)
+}
+
+// markParticipantStatus sets providerID's data-provider rows on c's job to
+// status (signed, or withdrawn on consent withdrawal).
+func (s *Server) markParticipantStatus(ctx context.Context, c *contract.Contract, providerID, userID, username, status string) {
 	jobID := c.JobID
 	if jobID == "" {
 		var err error
@@ -118,8 +124,8 @@ func (s *Server) markSignedParticipant(ctx context.Context, c *contract.Contract
 		if partyProviderID(dp) != providerID {
 			continue
 		}
-		if _, err := s.db.SetJobParticipantStatus(ctx, jobID, db.ParticipantRoleDataProvider, providerID, approvalItem(dp), db.ParticipantStatusSigned, userID, username); err != nil {
-			log.Printf("[JOB-PARTICIPANTS] Warning: job %s: %s not marked signed: %v", jobID, providerID, err)
+		if _, err := s.db.SetJobParticipantStatus(ctx, jobID, db.ParticipantRoleDataProvider, providerID, approvalItem(dp), status, userID, username); err != nil {
+			log.Printf("[JOB-PARTICIPANTS] Warning: job %s: %s not marked %s: %v", jobID, providerID, status, err)
 		}
 	}
 }
@@ -154,6 +160,11 @@ type userJob struct {
 	FinalizedAt   *time.Time    `json:"finalized_at"`
 	TEEEnabledAt  *time.Time    `json:"tee_enabled_at"`
 	Participation []userJobPart `json:"participation"`
+	// What happened to the contract, oldest first (contract_events.go), its
+	// latest entry, and who generated it.
+	Events    []db.ContractEvent `json:"events"`
+	LastEvent *db.ContractEvent  `json:"last_event"`
+	Consumer  string             `json:"consumer"`
 }
 
 // groupUserJobs folds a user's job_participants rows (newest job first) into
@@ -269,6 +280,7 @@ func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(
 		return
 	}
 	jobs := groupUserJobs(filterJobParticipants(rows, keep))
+	s.attachContractEvents(ctx, jobs)
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "user_id": userID, "count": len(jobs), "jobs": jobs})
 }
 
@@ -343,4 +355,33 @@ func (s *Server) isJobParticipant(ctx context.Context, c *contract.Contract, cal
 		}
 	}
 	return false, nil
+}
+
+// attachContractEvents fills each job's Events, LastEvent and Consumer from
+// contract_events. Best-effort: on error the jobs are returned without them.
+func (s *Server) attachContractEvents(ctx context.Context, jobs []userJob) {
+	ids := make([]string, 0, len(jobs))
+	for _, jb := range jobs {
+		ids = append(ids, jb.JobID)
+	}
+	byJob, err := s.db.ListContractEventsForJobs(ctx, ids)
+	if err != nil {
+		log.Printf("[JOB-PARTICIPANTS] Warning: contract events not loaded: %v", err)
+	}
+	for i := range jobs {
+		evs := byJob[jobs[i].JobID]
+		if evs == nil {
+			evs = []db.ContractEvent{}
+		}
+		jobs[i].Events = evs
+		if n := len(evs); n > 0 {
+			jobs[i].LastEvent = &evs[n-1]
+		}
+		for _, e := range evs {
+			if e.Event == db.ContractEventGenerated {
+				jobs[i].Consumer = e.Actor
+				break
+			}
+		}
+	}
 }

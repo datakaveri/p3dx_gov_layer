@@ -125,22 +125,29 @@ func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "BAD_REQUEST", "message": "contract_id is required"})
 		return
 	}
-	if s.cfg.CoordinatorAddr == "" {
-		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
-		return
-	}
 	if s.db == nil {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "database not available"})
 		return
 	}
 
-	c, err := s.loadContract(reqCtx(r), contractID)
+	// Signature gate: the stored contract must still hash to what gov_layer
+	// and every data provider signed. A contract edited after signing
+	// (PUT /contracts/{id}/workload) fails here and is never run.
+	c, err := s.requireAllProvidersSigned(reqCtx(r), contractID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+		detail := ""
+		stored, _ := s.loadContract(reqCtx(r), contractID)
+		if stored != nil {
+			got, _ := contract.ComputeHash(*stored)
+			detail = " (signed hash " + stored.ContractHash + ", stored content hashes to " + got + ")"
+		}
+		log.Printf("[TEE-RUN] REJECTED contract %s: %s%s", contractID, teeErrorMessage(err), detail)
+		s.recordContractEvent(reqCtx(r), stored, db.ContractEventRunRefused, "Run refused: "+teeErrorMessage(err), "governance-layer")
+		writeTEEError(w, err)
 		return
 	}
-	if c == nil {
-		writeJSON(w, http.StatusNotFound, j{"status": "FAILED", "error": "CONTRACT_NOT_FOUND", "message": "no contract " + contractID})
+	if s.cfg.CoordinatorAddr == "" {
+		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
 		return
 	}
 
@@ -172,6 +179,7 @@ func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
 			msg = err.Error()
 		}
 		log.Printf("[TEE-RUN] contract %s: grpcurl failed: %s", contractID, msg)
+		s.recordContractEvent(reqCtx(r), c, db.ContractEventRunFailed, "Run could not start: "+msg, "governance-layer")
 		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "GRPCURL_FAILED", "message": msg, "subContract": sub})
 		return
 	}
@@ -184,6 +192,24 @@ func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp["output"] = stdout.String()
 	}
+
+	// The run is live: the job reads as tee_enabled on the Audit page.
+	var created struct {
+		JobID string `json:"jobId"`
+	}
+	_ = json.Unmarshal(stdout.Bytes(), &created)
+	if err := s.db.MarkContractTEEEnabled(reqCtx(r), contractID); err != nil {
+		log.Printf("[TEE-RUN] Warning: contract %s not marked live: %v", contractID, err)
+	}
+	if c.JobID != "" {
+		s.markJobParticipants(reqCtx(r), c.JobID, db.ParticipantStatusTEEEnabled)
+	}
+	detail := "TEE run started"
+	if created.JobID != "" {
+		detail += " (coordinator job " + created.JobID + ")"
+	}
+	s.recordContractEvent(reqCtx(r), c, db.ContractEventRunStarted, detail, "governance-layer")
+
 	writeJSON(w, http.StatusOK, resp)
 }
 

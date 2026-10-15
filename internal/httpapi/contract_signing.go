@@ -241,6 +241,8 @@ func (s *Server) providerSignatures(ctx context.Context, c *contract.Contract, h
 			st.SignedAt = nil
 		}
 		switch {
+		case !st.Signed && sig.WithdrawnAt != nil:
+			st.Error = "consent withdrawn"
 		case !st.Signed:
 			st.Error = "not signed yet"
 		case !hashOK:
@@ -601,6 +603,7 @@ func (s *Server) signContract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.markSignedParticipant(reqCtx(r), c, providerID, signer.userID, body.ProviderUsername)
+	s.recordContractEvent(reqCtx(r), c, db.ContractEventSigned, "Signed by "+providerID, providerID)
 
 	if body.NotificationID != "" {
 		if _, err := s.db.RespondToNotification(reqCtx(r), body.NotificationID, providerID, "accepted", "signed"); err != nil {

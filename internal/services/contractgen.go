@@ -56,6 +56,7 @@ type GenerateContractInput struct {
 	ApplicationID string
 	Technique     string
 	ComputeChoice string // optional override; defaulted per technique when blank
+	Purpose       string // consumer's stated purpose of processing (DPDP Rule 3)
 	ConsumerID    string
 	ConsumerName  string
 	Form          map[string]interface{} // provider form data, if FetchDatasetForm found one
@@ -192,6 +193,7 @@ func BuildGeneratedContract(in GenerateContractInput) contract.Contract {
 		},
 		Technique:     in.Technique,
 		ComputeChoice: computeChoice,
+		Purpose:       in.Purpose,
 		Workload:      workload,
 		Parties: contract.Parties{
 			User: contract.UserParty{
