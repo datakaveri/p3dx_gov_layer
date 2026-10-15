@@ -274,3 +274,42 @@ func withoutSignatures(c Contract) Contract {
 
 	return c
 }
+
+// SubContract is the slice of a contract the Kata coordinator runs — the
+// body of CoordinatorService/CreateJob ({"contract": {...}}), in its
+// camelCase JSON shape.
+type SubContract struct {
+	Contract SubContractBody `json:"contract"`
+}
+
+type SubContractBody struct {
+	ContractID  string      `json:"contractId"`
+	Workload    *Workload   `json:"workload"`
+	Trustee     *JobTrustee `json:"trustee"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
+}
+
+// NewSubContract builds the CreateJob sub-contract from c. missing names
+// every required field c lacks; when it is non-empty the job must not be
+// sent.
+func NewSubContract(c *Contract) (sub SubContract, missing []string) {
+	if c.ContractID == "" {
+		missing = append(missing, "contract_id")
+	}
+	if c.Workload == nil || c.Workload.Image == "" {
+		missing = append(missing, "workload.image")
+	}
+	if c.Workload == nil || c.Workload.Env["DATASET_URL"] == "" {
+		missing = append(missing, "workload.env.DATASET_URL")
+	}
+	if c.Trustee == nil || c.Trustee.KBSURL == "" || c.Trustee.KeyResourcePath == "" {
+		missing = append(missing, "trustee")
+	}
+	sub.Contract = SubContractBody{
+		ContractID:  c.ContractID,
+		Workload:    c.Workload,
+		Trustee:     c.Trustee,
+		CallbackURL: c.CallbackURL,
+	}
+	return sub, missing
+}

@@ -43,6 +43,8 @@ info:
     | [(POST) /job/{jobId}/tee](#operation/post-job-tee) | DX Keycloak Token | Consumer (the job's) |
     | [(GET) /job/{jobId}/contract/{contractId}](#operation/get-job-contract) | DX Keycloak Token | Consumer, Data Provider, Infra Provider (the job's) |
     | [(GET) /jobs/user/{userId}](#operation/get-user-jobs) | DX Keycloak Token | Any user |
+    | [(GET) /jobs/consumer/{userId}](#operation/get-consumer-jobs) | DX Keycloak Token | Consumer |
+    | [(GET) /jobs/provider/{userId}](#operation/get-provider-jobs) | DX Keycloak Token | Data Provider |
     | [(POST) /vm-registry](#operation/post-vm-registry) | `X-VM-Registry-Token` header | Provisioning scripts |
     | [(GET) /vm-registry/output-owner](#operation/get-vm-registry-output-owner) | `X-VM-Registry-Token` header | Provisioning scripts |
     | [(GET) /vm-registry/data-providers](#operation/get-vm-registry-data-providers) | `X-VM-Registry-Token` header | Provisioning scripts |
@@ -52,13 +54,13 @@ info:
     # Job flow (TEE / SMPC with datasets and infra)
     1. Each provider registers their public key: `PUT /provider-keys/{role}`, and can check it is registered: `GET /provider-keys/{role}/status`
     2. The consumer generates the contract: `POST /generate-contract` (returns `job_id`, `contract_id` and `contract_hash`)
-    3. Each data provider and infra provider lists the jobs requested from them: `GET /jobs/user/{userId}` (their `participation` entry has `status` = `requested`), and gets the contract and its `contract_hash`: `GET /job/{jobId}/contract/{contractId}`
+    3. Each data provider lists the jobs requested from them: `GET /jobs/provider/{userId}` (an infra provider uses `GET /jobs/user/{userId}`, where their `participation` entry has `status` = `requested`), and gets the contract and its `contract_hash`: `GET /job/{jobId}/contract/{contractId}`
     4. Each data provider and infra provider approves the job and signs the `contract_hash`: `POST /job/approval/data-provider`, `POST /job/approval/infra-provider`
     5. The consumer can check which providers have signed: `GET /contracts/{contractId}/signatures`
     6. The consumer cross-verifies the approvals and signatures, which makes the contract final: `PUT /job/{jobId}/status`
     7. The consumer enables the TEE run: `POST /job/{jobId}/tee`
 
-    The consumer can list their own jobs and see each one's status at any point: `GET /jobs/user/{userId}`.
+    The consumer can list the jobs they created and see each one's status at any point: `GET /jobs/consumer/{userId}`.
 
     # API HTTP Responses
      Apart from the response codes specified in each API, the API server may respond with certain 4xx and 5xx error codes which are related to common API Gateway behaviours.
@@ -2180,6 +2182,163 @@ paths:
           label: List user jobs
           source: |
             curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/user/<userId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/jobs/consumer/{userId}:
+    get:
+      tags:
+        - Jobs
+      summary: List Consumer Jobs
+      description: |
+        Lists the jobs (contracts) the user created, as their consumer, newest first, with their status on each.
+        Only the user's `consumer` entry is in each job's `participation`.
+      operationId: get-consumer-jobs
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The user's Keycloak user id (`sub`); a username, email or provider id also works
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  user_id:
+                    type: string
+                  count:
+                    type: integer
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserJob'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                    count: 1
+                    jobs:
+                      - job_id: job-7d1e3c9a
+                        contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                        technique: TEE
+                        job_state: in_progress
+                        created_at: '2026-10-14T10:10:00Z'
+                        finalized_at: null
+                        tee_enabled_at: null
+                        participation:
+                          - role: consumer
+                            participant_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                            username: bob
+                            status: created
+                            updated_at: '2026-10-14T10:10:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `userId` is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: List consumer jobs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/consumer/<userId>' \
+              --header 'Authorization: Bearer <tokenValue>'
+
+  /api/v1/jobs/provider/{userId}:
+    get:
+      tags:
+        - Jobs
+      summary: List Data Provider Requested Jobs
+      description: |
+        Lists the jobs (contracts) the user is requested on as a data provider and has not yet approved or rejected,
+        newest first. Each job's `participation` holds only the user's `data-provider` entries with `status` = `requested`;
+        once they approve or reject the job (`POST /job/approval/data-provider`) it no longer appears. FL sessions are not listed.
+      operationId: get-provider-jobs
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: The user's Keycloak user id (`sub`); a username, email or provider id also works
+          schema:
+            type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  user_id:
+                    type: string
+                  count:
+                    type: integer
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserJob'
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    user_id: 0b6e3a7c-1f2d-4c5b-8a9e-3d4c5b6a7f8e
+                    count: 1
+                    jobs:
+                      - job_id: job-7d1e3c9a
+                        contract_id: 5c2b1e7a-3d4f-4a6b-9e8c-7d6f5e4a3b2c
+                        technique: TEE
+                        job_state: in_progress
+                        created_at: '2026-10-14T10:10:00Z'
+                        finalized_at: null
+                        tee_enabled_at: null
+                        participation:
+                          - role: data-provider
+                            participant_id: provider-alice
+                            user_id: ''
+                            username: ''
+                            item_id: ds-1
+                            item_name: Heart Disease Records
+                            status: requested
+                            updated_at: '2026-10-14T10:10:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - `BAD_REQUEST` : `userId` is required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          $ref: '#/components/responses/DevTokenUnauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: List data provider requested jobs
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/jobs/provider/<userId>' \
               --header 'Authorization: Bearer <tokenValue>'
 
   /api/v1/final-models:

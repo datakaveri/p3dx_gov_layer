@@ -92,6 +92,12 @@ type Config struct {
 	TEEPollInterval   time.Duration // TEE_POLL_INTERVAL_MS (default 5000)
 	TEEOutputTimeout  time.Duration // TEE_OUTPUT_TIMEOUT_MS (default 60000) — output may be large
 
+	// --- Run TEE (httpapi/job_tee.go runTEEJob) ---
+	// Runs `grpcurl -plaintext -d <sub-contract> COORDINATOR_ADDR
+	// kata.coordinator.v1.CoordinatorService/CreateJob`.
+	GrpcurlBin      string // GRPCURL_BIN (default "grpcurl")
+	CoordinatorAddr string // COORDINATOR_ADDR (host:port; empty = Run TEE disabled)
+
 	// --- TEE attestation (services/attestation.go) ---
 	// TEEAttestationRequired defaults to TRUE: a run is refused unless the TEE
 	// has produced a verified attestation. Set TEE_ATTESTATION_REQUIRED=false
@@ -155,6 +161,11 @@ type Config struct {
 	// default for every generated contract's parties.user.datablob_url
 	// (relayed to the workload as RESULT_URL). Blank leaves it empty.
 	DefaultResultURL string // DEFAULT_RESULT_URL
+
+	// ResultReadURL is a read-capable URL (e.g. an Azure SAS with sp=r) for
+	// the same result blob — DEFAULT_RESULT_URL's SAS is write-only — fetched
+	// server-side by GET /v1/tee/jobs/{jobId}/result. Blank disables it.
+	ResultReadURL string // RESULT_READ_URL
 
 	// ContractCallbackURL is the base of a TEE contract's callbackUrl;
 	// "/<contract_id>" is appended. Blank leaves callbackUrl out.
@@ -254,6 +265,9 @@ func Load() *Config {
 		TEEPollInterval:   getEnvMS("TEE_POLL_INTERVAL_MS", 5000),
 		TEEOutputTimeout:  getEnvMS("TEE_OUTPUT_TIMEOUT_MS", 60000),
 
+		GrpcurlBin:      getEnv("GRPCURL_BIN", "grpcurl"),
+		CoordinatorAddr: os.Getenv("COORDINATOR_ADDR"),
+
 		TEEAttestationRequired: getEnvBool("TEE_ATTESTATION_REQUIRED", true),
 		TEEMAAIssuers:          getEnvCSV("TEE_MAA_ISSUERS"),
 		TEEExpectedMeasurement: os.Getenv("TEE_EXPECTED_LAUNCH_MEASUREMENT"),
@@ -280,6 +294,7 @@ func Load() *Config {
 		KBSURL: strings.TrimRight(os.Getenv("KBS_URL"), "/"),
 
 		DefaultResultURL: strings.TrimSpace(os.Getenv("DEFAULT_RESULT_URL")),
+		ResultReadURL:    strings.TrimSpace(os.Getenv("RESULT_READ_URL")),
 
 		ContractCallbackURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CONTRACT_CALLBACK_URL")), "/"),
 

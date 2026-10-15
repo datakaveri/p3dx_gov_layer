@@ -7,10 +7,18 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -95,4 +103,180 @@ func teeErrorMessage(err error) string {
 		return te.Message
 	}
 	return err.Error()
+}
+
+// POST /v1/tee/run — body {"contract_id": "..."}. The UI's Run TEE: builds
+// the CreateJob sub-contract from the generated contract (contract.
+// NewSubContract) and runs
+//
+//	grpcurl -plaintext -d '<sub-contract>' $COORDINATOR_ADDR \
+//	  kata.coordinator.v1.CoordinatorService/CreateJob
+//
+// Returns the sub-contract that was sent and grpcurl's output (the Job).
+func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ContractID string `json:"contract_id"`
+	}
+	if !s.readBody(w, r, &body) {
+		return
+	}
+	contractID := strings.TrimSpace(body.ContractID)
+	if contractID == "" {
+		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "BAD_REQUEST", "message": "contract_id is required"})
+		return
+	}
+	if s.cfg.CoordinatorAddr == "" {
+		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
+		return
+	}
+	if s.db == nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "database not available"})
+		return
+	}
+
+	c, err := s.loadContract(reqCtx(r), contractID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+	if c == nil {
+		writeJSON(w, http.StatusNotFound, j{"status": "FAILED", "error": "CONTRACT_NOT_FOUND", "message": "no contract " + contractID})
+		return
+	}
+
+	sub, missing := contract.NewSubContract(c)
+	if len(missing) > 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, j{
+			"status": "FAILED", "error": "CONTRACT_INCOMPLETE",
+			"message": "contract is missing " + strings.Join(missing, ", "),
+		})
+		return
+	}
+	payload, err := json.Marshal(sub)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(reqCtx(r), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.GrpcurlBin, "-plaintext", "-d", string(payload),
+		s.cfg.CoordinatorAddr, "kata.coordinator.v1.CoordinatorService/CreateJob")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	log.Printf("[TEE-RUN] contract %s: grpcurl -plaintext -d '%s' %s kata.coordinator.v1.CoordinatorService/CreateJob",
+		contractID, payload, s.cfg.CoordinatorAddr)
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		log.Printf("[TEE-RUN] contract %s: grpcurl failed: %s", contractID, msg)
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "GRPCURL_FAILED", "message": msg, "subContract": sub})
+		return
+	}
+	log.Printf("[TEE-RUN] contract %s: %s", contractID, strings.TrimSpace(stdout.String()))
+
+	resp := j{"status": "SUCCESS", "subContract": sub}
+	var job json.RawMessage
+	if json.Unmarshal(stdout.Bytes(), &job) == nil {
+		resp["job"] = job
+	} else {
+		resp["output"] = stdout.String()
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// Coordinator job IDs look like "job-9f3c4952e83e".
+var teeJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+// GET /v1/tee/jobs/{jobId} — the UI's Run TEE progress, polled every few
+// seconds. Runs
+//
+//	grpcurl -plaintext -d '{"jobId": "<jobId>"}' $COORDINATOR_ADDR \
+//	  kata.coordinator.v1.CoordinatorService/GetJob
+//
+// and returns {"status": "SUCCESS", "job": <grpcurl's output>}.
+func (s *Server) getTEEJob(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "jobId")
+	if !teeJobIDPattern.MatchString(jobID) {
+		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "BAD_REQUEST", "message": "invalid jobId"})
+		return
+	}
+	if s.cfg.CoordinatorAddr == "" {
+		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"jobId": jobID})
+
+	ctx, cancel := context.WithTimeout(reqCtx(r), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.GrpcurlBin, "-plaintext", "-d", string(payload),
+		s.cfg.CoordinatorAddr, "kata.coordinator.v1.CoordinatorService/GetJob")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		log.Printf("[TEE-JOB] %s: grpcurl GetJob failed: %s", jobID, msg)
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "GRPCURL_FAILED", "message": msg})
+		return
+	}
+
+	var job json.RawMessage
+	if json.Unmarshal(stdout.Bytes(), &job) != nil {
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "BAD_COORDINATOR_RESPONSE", "message": strings.TrimSpace(stdout.String())})
+		return
+	}
+	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "job": job})
+}
+
+// GET /v1/tee/jobs/{jobId}/result — the UI's View Result. Fetches the
+// result blob the workload wrote (RESULT_READ_URL — DEFAULT_RESULT_URL's
+// SAS is write-only) server-side, so the read SAS never reaches the browser.
+// Returns {"status": "SUCCESS", "result": <JSON>} or, for a non-JSON blob,
+// {"status": "SUCCESS", "output": "<text>"}.
+func (s *Server) getTEEJobResult(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "jobId")
+	if !teeJobIDPattern.MatchString(jobID) {
+		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "BAD_REQUEST", "message": "invalid jobId"})
+		return
+	}
+	if s.cfg.ResultReadURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "RESULT_READ_URL is not set (needs a read SAS for the result blob)"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(reqCtx(r), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.ResultReadURL, nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "invalid RESULT_READ_URL"})
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "RESULT_FETCH_FAILED", "message": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "RESULT_FETCH_FAILED", "message": err.Error()})
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[TEE-JOB] %s: result fetch returned %d", jobID, resp.StatusCode)
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "RESULT_FETCH_FAILED", "message": "result storage returned status " + strconv.Itoa(resp.StatusCode)})
+		return
+	}
+
+	var result json.RawMessage
+	if json.Unmarshal(body, &result) == nil {
+		writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "result": result})
+		return
+	}
+	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "output": string(body)})
 }
