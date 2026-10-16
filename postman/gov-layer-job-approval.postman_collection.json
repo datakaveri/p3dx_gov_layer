@@ -541,9 +541,9 @@
       "name": "5. Job status to the user",
       "item": [
         {
-          "name": "5. Job status - PUT /job/{job_id}/status (as user)",
+          "name": "5. Job status - GET /job/{job_id}/status (as user)",
           "request": {
-            "method": "PUT",
+            "method": "GET",
             "header": [
               {
                 "key": "Accept",

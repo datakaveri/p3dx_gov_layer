@@ -11,7 +11,7 @@ import (
 
 // FinalContract is a job's final contract: the governance-signed contract,
 // stored once every approval, the contract hash and every signature on it
-// verified (PUT /job/{jobId}/status). Written once, never updated.
+// verified (GET /job/{jobId}/status). Written once, never updated.
 type FinalContract struct {
 	JobID        string          `json:"job_id"`
 	ContractID   string          `json:"contract_id"`

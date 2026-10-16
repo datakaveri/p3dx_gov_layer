@@ -48,6 +48,10 @@ type Signature struct {
 type Constraints struct {
 	AccessibilityLevel string   `json:"accessibility_level"`
 	RestrictedTo       []string `json:"restricted_to"`
+	// ConsentValidUntil is when a data provider's consent ends, set by that
+	// provider before signing (POST /contracts/{id}/consent-expiry). No run
+	// starts after it. omitempty keeps older contracts' hashes stable.
+	ConsentValidUntil *time.Time `json:"consent_valid_until,omitempty"`
 }
 
 // UserParty is the contract's requesting party (the FL output owner, or the
@@ -191,6 +195,11 @@ type Lifecycle struct {
 	CreatedAt  time.Time `json:"created_at"`
 	ValidFrom  time.Time `json:"valid_from"`
 	ValidUntil time.Time `json:"valid_until"`
+	// RequestedValidUntil is the end the consumer's contract was generated
+	// with, kept once a data provider's consent expiry shortens ValidUntil,
+	// so a later expiry change is still bounded by (and can return to) it.
+	// omitempty keeps older contracts' hashes stable.
+	RequestedValidUntil *time.Time `json:"requested_valid_until,omitempty"`
 }
 
 // SessionInfo identifies the request/session the contract was assembled for.
@@ -233,6 +242,13 @@ type Contract struct {
 	// hash came from gov_layer before signing it. Blanked by ComputeHash like
 	// the party signatures.
 	GovernanceSignature *Signature `json:"governance_signature,omitempty"`
+	// Amendment is gov_layer's signature over the content hash of a contract
+	// its consumer edited after it was signed (PUT /contracts/{id}). Its
+	// SignedHash is the edited content's hash; ContractHash stays the hash the
+	// providers signed, so their signatures keep verifying and the edit needs
+	// no re-signing. Blanked by ComputeHash; omitempty keeps older contracts'
+	// JSON unchanged.
+	Amendment *Signature `json:"amendment,omitempty"`
 }
 
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with
@@ -243,6 +259,7 @@ type Contract struct {
 func ComputeHash(c Contract) (string, error) {
 	c.ContractHash = ""
 	c.GovernanceSignature = nil
+	c.Amendment = nil
 	c = withoutSignatures(c)
 	b, err := json.Marshal(c)
 	if err != nil {

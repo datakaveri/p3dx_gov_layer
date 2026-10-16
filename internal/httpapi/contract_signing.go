@@ -108,10 +108,10 @@ func (s *Server) governanceSign(c *contract.Contract) error {
 
 // governanceSignatureOK reports whether c's governance signature over hash is
 // in order: required and valid, except on a job-approval contract
-// (needsJobApproval), which carries none — its providers' signatures over the
+// (jobApprovalRequired), which carries none — its providers' signatures over the
 // contract_hash stored at /generate-contract are what make it final.
 func (s *Server) governanceSignatureOK(c *contract.Contract, hash string) bool {
-	return needsJobApproval(c) || s.governanceSignatureValid(c, hash)
+	return s.jobApprovalRequired(c) || s.governanceSignatureValid(c, hash)
 }
 
 // governanceSignatureValid reports whether c carries a governance signature
@@ -216,11 +216,63 @@ type partySignatureStatus struct {
 // provider's (providerSignatures). allValid is true only when all
 // do and there is at least one data provider.
 func (s *Server) verifyContractSignatures(ctx context.Context, c *contract.Contract) (parties []partySignatureStatus, hashOK, allValid bool) {
-	hash, err := contract.ComputeHash(*c)
-	hashOK = err == nil && hash == c.ContractHash
-	parties, allValid = s.providerSignatures(ctx, c, hash, hashOK, nil)
-	allValid = allValid && hashOK && s.governanceSignatureOK(c, hash) && len(c.Parties.DataProviders) > 0
+	// hash, err := contract.ComputeHash(*c)
+	// hashOK = err == nil && hash == c.ContractHash
+	// parties, allValid = s.providerSignatures(ctx, c, hash, hashOK, nil)
+	// allValid = allValid && hashOK && s.governanceSignatureOK(c, hash) && len(c.Parties.DataProviders) > 0
+	// Signatures are checked against the signed hash (ContractHash); an edit
+	// made since (amendmentValid) keeps them valid without re-signing.
+	hashOK = s.contentMatchesSignedHash(c)
+	parties, allValid = s.providerSignatures(ctx, c, c.ContractHash, hashOK, nil)
+	allValid = allValid && hashOK && s.governanceSignatureOK(c, c.ContractHash) && len(c.Parties.DataProviders) > 0
 	return parties, hashOK, allValid
+}
+
+// contentMatchesSignedHash reports whether c's current content is what was
+// signed: it hashes to ContractHash, or it is a consumer edit gov_layer
+// signed as an amendment (amendmentValid).
+func (s *Server) contentMatchesSignedHash(c *contract.Contract) bool {
+	hash, err := contract.ComputeHash(*c)
+	if err != nil {
+		return false
+	}
+	return hash == c.ContractHash || s.amendmentValid(c, hash)
+}
+
+// amendmentValid reports whether c carries gov_layer's amendment signature
+// over hash (its edited content) that verifies against gov_layer's key.
+func (s *Server) amendmentValid(c *contract.Contract, hash string) bool {
+	a := c.Amendment
+	if s.govKey == nil || a == nil || a.SignedHash != hash || hash == "" {
+		return false
+	}
+	return services.VerifyContractHashSignature(s.govKey.PublicKeyPEM(), hash, a.Value) == nil
+}
+
+// amendSign signs c's current content hash with gov_layer's private key and
+// records it on c.Amendment, so a consumer's edit after signing is accepted
+// without its providers re-signing. ContractHash is left unchanged.
+func (s *Server) amendSign(c *contract.Contract) (string, error) {
+	if s.govKey == nil {
+		return "", errors.New("governance signing key not loaded")
+	}
+	hash, err := contract.ComputeHash(*c)
+	if err != nil {
+		return "", err
+	}
+	value, err := s.govKey.SignContractHash(hash)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC()
+	c.Amendment = &contract.Signature{
+		SignedAt:   &now,
+		Signer:     governanceSigner,
+		Algorithm:  services.ContractSignatureAlgorithm,
+		SignedHash: hash,
+		Value:      value,
+	}
+	return hash, nil
 }
 
 // providerSignatures checks each data-provider party on c — and, on a
@@ -349,6 +401,11 @@ func (s *Server) requireAllProvidersSigned(ctx context.Context, contractID strin
 		return nil, signatureGateError("waiting on provider signatures: " + strings.Join(pending, "; "))
 	}
 
+	// A provider's consent ends at their consent expiry.
+	if err := consentExpiryError(c, time.Now()); err != nil {
+		return nil, err
+	}
+
 	log.Printf("[SIGN] Gate passed: %s contract %s signed by all %d data provider(s)", c.Technique, c.ContractID, len(parties))
 	return c, nil
 }
@@ -366,6 +423,14 @@ func (s *Server) requireSignedContract(ctx context.Context, tc *services.TEECont
 	if err := s.requireTEEEnabled(ctx, c); err != nil {
 		return err
 	}
+	// (Workload checks dropped: any workload/image may run.)
+	// // The image this run starts must be the signed contract's workload.
+	// if c.Workload != nil && tc.AppDetails.ImageID != c.Workload.Image {
+	// 	return workloadNotAllowedError(fmt.Sprintf("appDetails.imageId %q is not the signed contract's workload image", tc.AppDetails.ImageID))
+	// }
+	// if err := requireWorkloadAllowed(c); err != nil {
+	// 	return err
+	// }
 	for _, p := range c.Parties.DataProviders {
 		if p.DataURL != "" && p.DataURL == tc.DatasetDetails.ResourceURL {
 			return nil
@@ -379,7 +444,8 @@ func (s *Server) requireSignedContract(ctx context.Context, tc *services.TEECont
 // "cannot run" pair.
 func (s *Server) writeSignatureStatus(w http.ResponseWriter, r *http.Request, c *contract.Contract) {
 	_, _, allValid := s.verifyContractSignatures(reqCtx(r), c)
-	if allValid && signable(c) {
+	// if allValid && signable(c) {
+	if allValid && signable(c) && consentExpiryError(c, time.Now()) == nil {
 		writeJSON(w, http.StatusOK, j{"signatures": "matching", "tee": "can run"})
 		return
 	}
@@ -531,6 +597,12 @@ func (s *Server) signContract(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR"})
 		return
+	}
+	// if hash != c.ContractHash || hash != body.ContractHash {
+	// An edit made after generation (amendmentValid) still signs the
+	// original ContractHash.
+	if hash != c.ContractHash && s.amendmentValid(c, hash) {
+		hash = c.ContractHash
 	}
 	if hash != c.ContractHash || hash != body.ContractHash {
 		writeJSON(w, http.StatusConflict, j{

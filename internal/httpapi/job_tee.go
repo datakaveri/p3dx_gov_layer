@@ -1,6 +1,6 @@
 // Enabling a job's TEE run: once every data and infra provider has approved
-// and signed a job's contract and PUT /job/{jobId}/status has cross-verified
-// it, it is final (putJobStatus, finalizeJob in job_approval.go), and the
+// and signed a job's contract and GET /job/{jobId}/status has cross-verified
+// it, it is final (getJobStatus, finalizeJob in job_approval.go), and the
 // job's consumer enables the TEE run with
 // POST /job/{jobId}/tee. Only then may a TEE session be started for that
 // contract (requireTEEEnabled, checked by requireSignedContract).
@@ -57,7 +57,7 @@ func (s *Server) enableJobTEE(w http.ResponseWriter, r *http.Request) {
 	}
 	if at == nil {
 		writeJSON(w, http.StatusConflict, j{"status": "FAILED", "error": "CONTRACT_NOT_FINAL",
-			"message": "the job's contract is not final yet: every data and infra provider must approve it, then PUT /job/" + jobID + "/status must return approved"})
+			"message": "the job's contract is not final yet: every data and infra provider must approve it, then GET /job/" + jobID + "/status must return approved"})
 		return
 	}
 	s.markJobParticipants(reqCtx(r), jobID, db.ParticipantStatusTEEEnabled)
@@ -75,7 +75,7 @@ func (s *Server) enableJobTEE(w http.ResponseWriter, r *http.Request) {
 // requireTEEEnabled refuses a TEE run for a job-approval contract (datasets +
 // infra) whose consumer hasn't enabled it (POST /job/{jobId}/tee).
 func (s *Server) requireTEEEnabled(ctx context.Context, c *contract.Contract) error {
-	if !needsJobApproval(c) {
+	if !s.jobApprovalRequired(c) {
 		return nil
 	}
 	jobID := c.JobID
@@ -146,6 +146,13 @@ func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
 		writeTEEError(w, err)
 		return
 	}
+	// The workload must be the catalogue workload's own image.
+	if err := requireWorkloadAllowed(c); err != nil {
+		log.Printf("[TEE-RUN] REJECTED contract %s: %s", contractID, teeErrorMessage(err))
+		s.recordContractEvent(reqCtx(r), c, db.ContractEventRunRefused, "Run refused: "+teeErrorMessage(err), "governance-layer")
+		writeTEEError(w, err)
+		return
+	}
 	if s.cfg.CoordinatorAddr == "" {
 		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
 		return
@@ -209,6 +216,10 @@ func (s *Server) runTEEJob(w http.ResponseWriter, r *http.Request) {
 		detail += " (coordinator job " + created.JobID + ")"
 	}
 	s.recordContractEvent(reqCtx(r), c, db.ContractEventRunStarted, detail, "governance-layer")
+	// Record how the run ends (tee_outcome.go), even if nobody watches it.
+	if created.JobID != "" {
+		go s.watchTEERun(created.JobID)
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -233,29 +244,20 @@ func (s *Server) getTEEJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, j{"status": "FAILED", "error": "NOT_CONFIGURED", "message": "COORDINATOR_ADDR is not set"})
 		return
 	}
-	payload, _ := json.Marshal(map[string]string{"jobId": jobID})
-
-	ctx, cancel := context.WithTimeout(reqCtx(r), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, s.cfg.GrpcurlBin, "-plaintext", "-d", string(payload),
-		s.cfg.CoordinatorAddr, "kata.coordinator.v1.CoordinatorService/GetJob")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		log.Printf("[TEE-JOB] %s: grpcurl GetJob failed: %s", jobID, msg)
-		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "GRPCURL_FAILED", "message": msg})
+	out, err := s.fetchCoordinatorJob(reqCtx(r), jobID)
+	if err != nil {
+		log.Printf("[TEE-JOB] %s: grpcurl GetJob failed: %s", jobID, err)
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "GRPCURL_FAILED", "message": err.Error()})
 		return
 	}
 
 	var job json.RawMessage
-	if json.Unmarshal(stdout.Bytes(), &job) != nil {
-		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "BAD_COORDINATOR_RESPONSE", "message": strings.TrimSpace(stdout.String())})
+	if json.Unmarshal(out, &job) != nil {
+		writeJSON(w, http.StatusBadGateway, j{"status": "FAILED", "error": "BAD_COORDINATOR_RESPONSE", "message": strings.TrimSpace(string(out))})
 		return
 	}
+	// Record the outcome now if the job is final (no-op if already recorded).
+	s.settleTEERun(reqCtx(r), out)
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "job": job})
 }
 

@@ -49,7 +49,7 @@ type Server struct {
 
 // New builds the Server.
 func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *services.GovernanceKey) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg,
 		db:  database,
 		kc:  kc,
@@ -60,6 +60,9 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *servi
 		publicKeys:  dbPublicKeys{database},
 		govKey:      govKey,
 	}
+	// Pick up TEE runs whose outcome wasn't recorded before a restart.
+	go s.resumeTEERunWatchers()
+	return s
 }
 
 // Handler returns the root http.Handler with CORS + the routes mounted at both
@@ -127,6 +130,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// signatures routes report who has signed (FL looks it up by session).
 	r.Post("/contracts/{contractId}/sign", s.handleSignContract)
 	r.Post("/contracts/{contractId}/withdraw-consent", s.handleWithdrawConsent)
+	r.Post("/contracts/{contractId}/consent-expiry", s.handleSetConsentExpiry)
+	r.Get("/contracts/{contractId}", s.getConsumerContract)
 	r.Get("/contracts/{contractId}/signatures", s.getContractSignatures)
 	// Consumer edit of a TEE contract, in place and unsigned
 	// (contract_edit.go) — the run gate then refuses it.
@@ -139,7 +144,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// data/infra provider on a contract's job_id, recorded in the audit table.
 	r.Post("/job/approval/data-provider", s.handleDataProviderApproval)
 	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
-	r.Put("/job/{jobId}/status", s.putJobStatus)
+	// r.Put("/job/{jobId}/status", s.putJobStatus)
+	r.Get("/job/{jobId}/status", s.getJobStatus)
 	r.Post("/job/{jobId}/tee", s.enableJobTEE)
 	// The job's contract + its contract_hash (job_participants.go).
 	r.Get("/job/{jobId}/contract/{contractId}", s.getJobContract)

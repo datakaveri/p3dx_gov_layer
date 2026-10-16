@@ -94,7 +94,7 @@ func TestProviderIDForUsername(t *testing.T) {
 func TestVerifyContractSignatures(t *testing.T) {
 	alice, alicePub := newRSAKey(t)
 	bob, bobPub := newRSAKey(t)
-	srv := newTestServer(nil)
+	srv := newTestServer(&config.Config{RequireInfraApproval: true}) // the default; off, a TEE contract with no infra goes through job approval instead
 	srv.publicKeys = stubKeys{"alice": alicePub, "bob": bobPub}
 	ctx := context.Background()
 
@@ -131,7 +131,7 @@ func TestVerifyContractSignatures(t *testing.T) {
 	if _, _, all := srv.verifyContractSignatures(ctx, &noGov); all {
 		t.Fatal("contract without a governance signature passed verification")
 	}
-	otherGov := newTestServer(nil) // a different governance key
+	otherGov := newTestServer(&config.Config{RequireInfraApproval: true}) // a different governance key
 	otherGov.publicKeys = srv.publicKeys
 	if _, _, all := otherGov.verifyContractSignatures(ctx, &c); all {
 		t.Fatal("governance signature from another key was accepted")
@@ -143,6 +143,53 @@ func TestVerifyContractSignatures(t *testing.T) {
 	tampered.Parties.DataProviders[0].DataURL = "https://evil/a"
 	if _, hashOK, all := srv.verifyContractSignatures(ctx, &tampered); hashOK || all {
 		t.Fatal("tampered contract passed verification")
+	}
+}
+
+// A consumer edit after signing, signed by gov_layer as an amendment, keeps
+// every provider signature valid; an edit without one (or a later change
+// past the amendment) does not.
+func TestAmendedContractKeepsSignatures(t *testing.T) {
+	alice, alicePub := newRSAKey(t)
+	bob, bobPub := newRSAKey(t)
+	srv := newTestServer(nil)
+	srv.publicKeys = stubKeys{"alice": alicePub, "bob": bobPub}
+	ctx := context.Background()
+
+	c := twoProviderContract(t, srv)
+	sign(&c, 0, "alice", signWith(t, alice, c.ContractHash))
+	sign(&c, 1, "bob", signWith(t, bob, c.ContractHash))
+	signedHash := c.ContractHash
+
+	c.Parties.DataProviders = append([]contract.DataProviderParty(nil), c.Parties.DataProviders...)
+	c.Parties.DataProviders[0].DataURL = "https://example/other"
+	if _, hashOK, all := srv.verifyContractSignatures(ctx, &c); hashOK || all {
+		t.Fatal("edit without an amendment passed verification")
+	}
+
+	if _, err := srv.amendSign(&c); err != nil {
+		t.Fatal(err)
+	}
+	if parties, hashOK, all := srv.verifyContractSignatures(ctx, &c); !hashOK || !all {
+		t.Fatalf("amended contract failed verification: hashOK=%t parties=%+v", hashOK, parties)
+	}
+	if c.ContractHash != signedHash {
+		t.Fatalf("amendment changed contract_hash %s -> %s", signedHash, c.ContractHash)
+	}
+
+	// A further change not re-amended by gov_layer is caught.
+	c.Parties.DataProviders[0].DataURL = "https://evil/a"
+	if _, hashOK, all := srv.verifyContractSignatures(ctx, &c); hashOK || all {
+		t.Fatal("change past the amendment passed verification")
+	}
+
+	// An amendment from another governance key is not accepted.
+	other := newTestServer(nil)
+	if _, err := other.amendSign(&c); err != nil {
+		t.Fatal(err)
+	}
+	if _, hashOK, _ := srv.verifyContractSignatures(ctx, &c); hashOK {
+		t.Fatal("amendment by another key was accepted")
 	}
 }
 

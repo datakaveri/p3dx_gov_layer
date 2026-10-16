@@ -892,9 +892,9 @@
       "name": "3. Cross-verify signatures + job status (consumer)",
       "item": [
         {
-          "name": "3a. Cross-verify signatures + job status (PUT /job/{job_id}/status)",
+          "name": "3a. Cross-verify signatures + job status (GET /job/{job_id}/status)",
           "request": {
-            "method": "PUT",
+            "method": "GET",
             "header": [
               {
                 "key": "Accept",
