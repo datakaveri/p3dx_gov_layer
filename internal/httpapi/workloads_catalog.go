@@ -7,7 +7,7 @@ import (
 )
 
 // GET /workloads — every workload a TEE contract can run
-// (services.KnownWorkloads): id, name, image, cpu, memory.
+// (services.KnownWorkloads): id, name, image, cpu, memory, purposes.
 func (s *Server) listWorkloads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "workloads": services.ListKnownWorkloads()})
 }

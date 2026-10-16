@@ -182,3 +182,18 @@ func (d *DB) GetNotificationsBySender(ctx context.Context, senderUsername string
 	}
 	return notifications, nil
 }
+
+// SupersedeContractSignRequests marks every CONTRACT_SIGN notification for
+// contractID answered "superseded" — after the contract is re-hashed, those
+// requests carry a stale hash and new ones replace them. Returns how many.
+func (d *DB) SupersedeContractSignRequests(ctx context.Context, contractID string) (int64, error) {
+	tag, err := d.Pool.Exec(ctx, `UPDATE notifications
+		SET response = 'superseded', response_message = 'contract changed; a new sign request replaces this one',
+		    responded_at = NOW(), read = true, read_at = COALESCE(read_at, NOW())
+		WHERE payload->>'type' = 'CONTRACT_SIGN' AND payload->>'contract_id' = $1
+		  AND response IS DISTINCT FROM 'superseded'`, contractID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}

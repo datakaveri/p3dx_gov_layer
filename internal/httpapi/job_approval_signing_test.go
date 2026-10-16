@@ -19,7 +19,7 @@ func approvalContract() *contract.Contract {
 	}}
 }
 
-// PUT /job/{jobId}/status cross-verifies every provider's submitted
+// GET /job/{jobId}/status cross-verifies every provider's submitted
 // signature: over gov_layer's own hash of the contract, verifying with the
 // signer's registered public key, and an infra signed by its owner.
 func TestVerifyJobSignatures(t *testing.T) {

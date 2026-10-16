@@ -246,7 +246,7 @@ func (d *DB) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS contract_events_job_idx ON contract_events(job_id)`,
 		`CREATE INDEX IF NOT EXISTS contract_events_contract_idx ON contract_events(contract_id)`,
 		// A job's final contract (final_contracts.go): the governance-signed
-		// contract, stored once at PUT /job/{jobId}/status after every
+		// contract, stored once at GET /job/{jobId}/status after every
 		// approval, the contract hash and every signature verified. Its own
 		// table so it stays as created while the contracts row moves on.
 		`CREATE TABLE IF NOT EXISTS final_contracts (

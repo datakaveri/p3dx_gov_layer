@@ -119,6 +119,12 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		policy, err := services.FetchPolicyForDataset(d.DatasetID, "", req.ProviderID, datasetName, req.Technique, claims, lookupProvider)
 		if err != nil {
 			log.Printf("[GENERATE] Warning: no policy found in APD for dataset %s: %v", d.DatasetID, err)
+			// (Workload restriction dropped: a TEE dataset without a policy
+			// falls back to its catalogue owner again, like SMPC.)
+			// if req.Technique == "TEE" {
+			// 	http.Error(w, fmt.Sprintf("dataset %s has no data-provider policy naming the workloads it may be used for", d.DatasetID), http.StatusForbidden)
+			// 	return
+			// }
 			if req.Technique != "FL" {
 				// TEE/SMPC without an APD policy: the dataset's DX catalogue
 				// owner (uploadedBy) is its provider, so the job request still
@@ -126,6 +132,19 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 				s.catalogueOwnerAsProvider(r.Context(), d.DatasetID, tokenStr, &in)
 			}
 		} else {
+			// TEE: the dataset's provider may limit which workloads can run
+			// on it (PolicyForm.jsx's "Allowed workloads"). Unlike the rest
+			// of this lookup, this one does gate the preview.
+			// TEE: if the provider picked workloads for this dataset (PolicyForm's
+			// "Workloads for this purpose"), only those may run on it; none
+			// picked means any workload.
+			// (Workload matching dropped: any workload may be picked for
+			// any dataset, whatever its policy's allowed workloads.)
+			// if req.Technique == "TEE" && !services.PolicyAllowsWorkload(policy, req.ApplicationID) {
+			// 	// http.Error(w, fmt.Sprintf("workload %q is not allowed by the data provider's policy for dataset %s", req.ApplicationID, d.DatasetID), http.StatusForbidden)
+			// 	http.Error(w, services.WorkloadMismatchMessage(policy, d.DatasetID, req.ApplicationID), http.StatusForbidden)
+			// 	return
+			// }
 			in.IsPrivate = services.IsPrivateDataset(policy)
 			if url, ok := policy["data_url"].(string); ok {
 				in.DataURL = url
@@ -167,7 +186,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// InfraCat: resolve each selected infrastructure's APD policy into the
-	// contract's InfraProviderParty fields. SMPC only, and never gates the
+	// contract's InfraProviderParty fields. TEE (optional) and SMPC, and never gates the
 	// preview — same graceful-degradation style as the dataset policy fetch
 	// above (BuildGeneratedContract falls back to "Unknown Infrastructure" if
 	// a lookup or shape doesn't resolve a name). The 5 confidential-compute
@@ -175,7 +194,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	// stores them at registration time (OR'd across that infra's own node
 	// pools/VM instance), so no tech-string classification happens here.
 	var infraInputs []services.InfraInput
-	if req.Technique == "SMPC" {
+	if req.Technique == "TEE" || req.Technique == "SMPC" {
 		for _, infraID := range req.InfraIDs {
 			in := services.InfraInput{InfraID: infraID}
 			infraPolicy, err := services.FetchInfraPolicy(infraID)
@@ -240,7 +259,7 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 	// (storedContractHash), its providers sign when approving and the
 	// approvals are cross-verified against (jobContractHash). It is never
 	// governance-signed.
-	needsApproval := needsJobApproval(&contract)
+	needsApproval := s.jobApprovalRequired(&contract)
 	if needsApproval {
 		contract.ContractHash = ""
 		if _, hash, err := storedContractHash(contract); err == nil {

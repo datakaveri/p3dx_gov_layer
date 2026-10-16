@@ -39,7 +39,7 @@ info:
     | [(POST) /contracts/{contractId}/sign](#operation/post-contract-sign) | P3DX Keycloak Token or DX Keycloak Token | Data Provider |
     | [(POST) /job/approval/data-provider](#operation/post-job-approval-data-provider) | DX Keycloak Token | Data Provider |
     | [(POST) /job/approval/infra-provider](#operation/post-job-approval-infra-provider) | DX Keycloak Token | Infra Provider |
-    | [(PUT) /job/{jobId}/status](#operation/put-job-status) | DX Keycloak Token | Consumer (the job's) |
+    | [(GET) /job/{jobId}/status](#operation/get-job-status) | DX Keycloak Token | Consumer (the job's) |
     | [(POST) /job/{jobId}/tee](#operation/post-job-tee) | DX Keycloak Token | Consumer (the job's) |
     | [(GET) /job/{jobId}/contract/{contractId}](#operation/get-job-contract) | DX Keycloak Token | Consumer, Data Provider, Infra Provider (the job's) |
     | [(GET) /jobs/user/{userId}](#operation/get-user-jobs) | DX Keycloak Token | Any user |
@@ -57,7 +57,7 @@ info:
     3. Each data provider lists the jobs requested from them: `GET /jobs/provider/{userId}` (an infra provider uses `GET /jobs/user/{userId}`, where their `participation` entry has `status` = `requested`), and gets the contract and its `contract_hash`: `GET /job/{jobId}/contract/{contractId}`
     4. Each data provider and infra provider approves the job and signs the `contract_hash`: `POST /job/approval/data-provider`, `POST /job/approval/infra-provider`
     5. The consumer can check which providers have signed: `GET /contracts/{contractId}/signatures`
-    6. The consumer cross-verifies the approvals and signatures, which makes the contract final: `PUT /job/{jobId}/status`
+    6. The consumer cross-verifies the approvals and signatures, which makes the contract final: `GET /job/{jobId}/status`
     7. The consumer enables the TEE run: `POST /job/{jobId}/tee`
 
     The consumer can list the jobs they created and see each one's status at any point: `GET /jobs/consumer/{userId}`.
@@ -1154,7 +1154,7 @@ paths:
           - `application_id` : Optional, the application to run
           - `provider_id` : Optional, overrides the provider named by the APD policy
           - `compute_choice` : Optional, defaulted per technique
-          - `infra_ids` : The selected infrastructures; SMPC needs exactly 2
+          - `infra_ids` : The selected infrastructures; SMPC needs exactly 2, optional for TEE
           - `purpose` : The specific purpose of processing, shown to data providers in the DPDP Rule 3 consent
             notice and covered by the contract hash. Required for TEE; at most 1000 characters
         required: true
@@ -1442,6 +1442,54 @@ paths:
               --header 'Content-Type: application/json' \
               --data-raw '<payload>'
 
+  /api/v1/contracts/{contractId}/consent-expiry:
+    post:
+      tags:
+        - Contract Signing
+      summary: Set Consent Expiry
+      description: |
+        A data provider sets when their consent on a TEE/SMPC consent request ends, before signing it.
+
+        * The provider is the user in their own token, and must be a data provider on the contract who has not
+          signed it yet (withdraw consent first to change it after signing).
+        * `valid_until` must be in the future and no later than the contract's `lifecycle.valid_until`. A date
+          (`YYYY-MM-DD`) means the end of that day, UTC.
+        * It is stored as `data_providers[].constraints.consent_valid_until`, which is covered by the contract
+          hash: the contract is re-hashed and re-signed by the governance layer, any signatures already given are
+          cleared, the old sign requests are marked `superseded`, and every data provider is sent a new one.
+        * The consumer gets a `CONSENT_EXPIRY_SET` notification and a `consent_expiry_set` contract event.
+        * Once any provider's consent has expired, the run gate refuses the contract with `CONSENT_EXPIRED`.
+        * Not available on contracts that go through job approval.
+      operationId: post-contract-consent-expiry
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - valid_until
+              properties:
+                valid_until:
+                  type: string
+            examples:
+              Set Consent Expiry:
+                value:
+                  valid_until: '2026-11-30'
+      responses:
+        '200':
+          description: OK — the updated contract, its new hash, and how many sign requests were re-sent.
+        '400':
+          description: Bad or out-of-range `valid_until`, or not a TEE/SMPC contract.
+        '403':
+          description: The caller is not a data provider on this contract.
+        '404':
+          description: Contract not found.
+        '409':
+          description: Already signed, or the contract goes through job approval.
+
   /api/v1/contracts/{contractId}/withdraw-consent:
     post:
       tags:
@@ -1545,6 +1593,26 @@ paths:
             curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>/signatures'
 
   /api/v1/contracts/{contractId}:
+    get:
+      tags:
+        - Contract Signing
+      summary: Get Contract
+      description: |
+        The stored contract, for the consumer who generated it (their Keycloak token's `sub` must be
+        `parties.user.id`). Used by the consent request preview to pick up later changes, such as a data
+        provider's consent expiry.
+      operationId: get-contract
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      responses:
+        '200':
+          description: '`{"status": "SUCCESS", "contract": {...}}`'
+        '401':
+          description: Invalid Keycloak token.
+        '403':
+          description: Not the consumer who generated this contract.
+        '404':
+          description: Contract not found.
     put:
       tags:
         - Contract Signing
@@ -1633,7 +1701,7 @@ paths:
         - Contract Signing
       summary: List Workloads
       description: |
-        Every workload a TEE contract can run (gov_layer's KnownWorkloads): `id` (sent as application_id / workload.id), `name`, `image`, `cpu`, `memory`.
+        Every workload a TEE contract can run (gov_layer's KnownWorkloads): `id` (sent as application_id / workload.id), `name`, `image`, `cpu`, `memory`, and `purposes` (the dataset purposes — research, clinical, benchmarking, internal — the workload is offered for on the dataset policy form).
       operationId: list-workloads
       responses:
         '200':
@@ -1833,7 +1901,7 @@ paths:
                       submitted: true
                       contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
                       items_signed: 1
-                      verified_at: PUT /job/job-7d1e3c9a/status
+                      verified_at: GET /job/job-7d1e3c9a/status
                       verified: true
                     grants:
                       - item_type: dataset
@@ -1848,7 +1916,7 @@ paths:
           description: |-
             Bad Request
             - `BAD_REQUEST` : invalid body, or `job_id` missing
-            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `NO_APPROVAL_NEEDED` : the contract does not go through job approval — it names no dataset, or no infrastructure while `REQUIRE_INFRA_APPROVAL` is on (with it off, TEE/SMPC contracts with datasets but no selected infrastructure are approved on their data-provider approval alone)
             - `MISSING_FIELDS` : `contract_hash` or `signature` missing
             - `INVALID_SIGNATURE` : the hash is not this job's, the caller has no registered key, or the signature does not verify
           content:
@@ -1893,7 +1961,7 @@ paths:
       summary: Infra Provider Approves Job
       description: |
         An infra provider approves a job and signs its contract hash, for the caller's own infrastructures on the job's
-        contract. The signature is stored as submitted and cross-verified at [Check Job Status](#operation/put-job-status).
+        contract. The signature is stored as submitted and cross-verified at [Check Job Status](#operation/get-job-status).
 
         `approval` is the caller's own result; `job_approval` is the whole job's.
       operationId: post-job-approval-infra-provider
@@ -1930,12 +1998,12 @@ paths:
                       submitted: true
                       contract_hash: 9f2c4e6a8b0d1f3e5c7a9b1d3f5e7c9a1b3d5f7e9c1a3b5d7f9e1c3a5b7d9f1e
                       items_signed: 1
-                      verified_at: PUT /job/job-7d1e3c9a/status
+                      verified_at: GET /job/job-7d1e3c9a/status
         '400':
           description: |-
             Bad Request
             - `BAD_REQUEST` : invalid body, or `job_id` missing
-            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `NO_APPROVAL_NEEDED` : the contract does not go through job approval — it names no dataset, or no infrastructure while `REQUIRE_INFRA_APPROVAL` is on (with it off, TEE/SMPC contracts with datasets but no selected infrastructure are approved on their data-provider approval alone)
             - `MISSING_FIELDS` : `contract_hash` or `signature` missing
           content:
             application/json:
@@ -1973,7 +2041,7 @@ paths:
               --data-raw '<payload>'
 
   /api/v1/job/{jobId}/status:
-    put:
+    get:
       tags:
         - Job Approval
       summary: Check Job Status
@@ -1989,7 +2057,7 @@ paths:
         Otherwise `status` is `not approved` with the `reasons`, and nothing is created.
 
         Can be called again: once approved it re-verifies, returns the same final contract and re-posts the grants.
-      operationId: put-job-status
+      operationId: get-job-status
       parameters:
         - $ref: '#/components/parameters/JobIdParam'
       responses:
@@ -2069,7 +2137,7 @@ paths:
           description: |-
             Bad Request
             - `BAD_REQUEST` : `jobId` missing
-            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `NO_APPROVAL_NEEDED` : the contract does not go through job approval — it names no dataset, or no infrastructure while `REQUIRE_INFRA_APPROVAL` is on (with it off, TEE/SMPC contracts with datasets but no selected infrastructure are approved on their data-provider approval alone)
           content:
             application/json:
               schema:
@@ -2100,7 +2168,7 @@ paths:
         - lang: cURL
           label: Check job status
           source: |
-            curl --location --request PUT 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/status' \
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/status' \
               --header 'Authorization: Bearer <tokenValue>'
 
   /api/v1/job/{jobId}/tee:
@@ -2155,7 +2223,7 @@ paths:
           description: |-
             Bad Request
             - `BAD_REQUEST` : `jobId` missing
-            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `NO_APPROVAL_NEEDED` : the contract does not go through job approval — it names no dataset, or no infrastructure while `REQUIRE_INFRA_APPROVAL` is on (with it off, TEE/SMPC contracts with datasets but no selected infrastructure are approved on their data-provider approval alone)
           content:
             application/json:
               schema:
@@ -2176,7 +2244,7 @@ paths:
           description: |-
             Conflict
             - `CONTRACT_NOT_SIGNED` : not every signature on the contract verifies
-            - `CONTRACT_NOT_FINAL` : the contract is not final yet; `PUT /job/{jobId}/status` must return `approved` first
+            - `CONTRACT_NOT_FINAL` : the contract is not final yet; `GET /job/{jobId}/status` must return `approved` first
           content:
             application/json:
               schema:
@@ -2186,7 +2254,7 @@ paths:
                   value:
                     status: FAILED
                     error: CONTRACT_NOT_FINAL
-                    message: 'the job''s contract is not final yet: every data and infra provider must approve it, then PUT /job/job-7d1e3c9a/status must return approved'
+                    message: 'the job''s contract is not final yet: every data and infra provider must approve it, then GET /job/job-7d1e3c9a/status must return approved'
         '500':
           $ref: '#/components/responses/InternalError'
       security:
@@ -2235,7 +2303,7 @@ paths:
           description: |-
             Bad Request
             - `BAD_REQUEST` : `jobId` missing
-            - `NO_APPROVAL_NEEDED` : the contract does not name both a dataset and an infrastructure
+            - `NO_APPROVAL_NEEDED` : the contract does not go through job approval — it names no dataset, or no infrastructure while `REQUIRE_INFRA_APPROVAL` is on (with it off, TEE/SMPC contracts with datasets but no selected infrastructure are approved on their data-provider approval alone)
           content:
             application/json:
               schema:

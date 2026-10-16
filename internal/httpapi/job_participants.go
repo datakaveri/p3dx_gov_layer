@@ -13,7 +13,7 @@
 //   - POST /job/approval/{data,infra}-provider: the caller's items
 //     "approved" / "rejected", with their user id from their token.
 //   - POST /contracts/{contractId}/sign: the signer's datasets "signed".
-//   - PUT /job/{jobId}/status (once final) and POST /job/{jobId}/tee: every
+//   - GET /job/{jobId}/status (once final) and POST /job/{jobId}/tee: every
 //     participant "final" / "tee_enabled".
 package httpapi
 
@@ -317,7 +317,7 @@ func (s *Server) getJobContract(w http.ResponseWriter, r *http.Request) {
 			"message": "only this job's consumer or its data / infra providers can read its contract"})
 		return
 	}
-	hash, err := jobContractHash(c)
+	hash, err := s.signedJobContractHash(c)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, j{"status": "FAILED", "error": "CONTRACT_HASH_MISMATCH", "message": err.Error()})
 		return

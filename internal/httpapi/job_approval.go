@@ -28,7 +28,7 @@
 // (PUT /provider-keys/{role}) — and sends it with the approval call:
 // {"job_id", "contract_hash", "signature"}. The approval call stores it as
 // submitted; the governance layer cross-verifies every provider's hash and
-// signature at PUT /job/{jobId}/status (putJobStatus), and only if all verify
+// signature at GET /job/{jobId}/status (getJobStatus), and only if all verify
 // does it governance-sign the contract, post the APD consumer grants and make
 // the contract final.
 package httpapi
@@ -66,6 +66,25 @@ func needsJobApproval(c *contract.Contract) bool {
 		}
 	}
 	return false
+}
+
+// jobApprovalRequired reports whether c goes through job approval: it names
+// datasets and real infra (needsJobApproval), or — with REQUIRE_INFRA_APPROVAL
+// off, so a job is approved on its data-provider approval alone — it is a
+// TEE/SMPC contract naming datasets but no selected infra (e.g. TEE on the
+// placeholder infra). FL contracts never do; they're signed on their roster.
+func (s *Server) jobApprovalRequired(c *contract.Contract) bool {
+	// Only datasets + real infra go through job approval: a TEE/SMPC contract
+	// with no selected infra is sent straight to its data providers to sign
+	// (the UI has no job-approval screen), whatever REQUIRE_INFRA_APPROVAL is.
+	// if needsJobApproval(c) {
+	// 	return true
+	// }
+	// if s.cfg == nil || s.cfg.RequireInfraApproval {
+	// 	return false
+	// }
+	// return len(c.Parties.DataProviders) > 0 && (c.Technique == "TEE" || c.Technique == "SMPC")
+	return needsJobApproval(c)
 }
 
 func catalogueHas(items []services.CatalogueItem, item string) bool {
@@ -428,7 +447,7 @@ func (s *Server) loadJobApprovalState(ctx context.Context, jobID string) (jobApp
 // job is accepted. Backfilled contracts carry job_id only in the DB column,
 // so it's read from there when the JSON has none.
 func (s *Server) signingAllowed(ctx context.Context, c *contract.Contract) (bool, error) {
-	if !needsJobApproval(c) {
+	if !s.jobApprovalRequired(c) {
 		return true, nil
 	}
 	jobID := c.JobID
@@ -485,8 +504,8 @@ func (s *Server) loadContractByJob(w http.ResponseWriter, r *http.Request, jobID
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": "stored contract is not valid: " + err.Error()})
 		return nil, false
 	}
-	if !needsJobApproval(c) {
-		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "NO_APPROVAL_NEEDED", "message": "contract does not name both a dataset and an infrastructure"})
+	if !s.jobApprovalRequired(c) {
+		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "NO_APPROVAL_NEEDED", "message": "contract does not go through job approval (it needs a dataset and an infrastructure, or REQUIRE_INFRA_APPROVAL=false for TEE/SMPC)"})
 		return nil, false
 	}
 	return c, true
@@ -517,7 +536,7 @@ func (s *Server) loadApprovalJob(w http.ResponseWriter, r *http.Request) (approv
 
 // requireSubmittedSignature refuses an approval call without the signed
 // contract hash; it is stored as submitted and cross-verified at
-// PUT /job/{jobId}/status. On failure it has already written the response.
+// GET /job/{jobId}/status. On failure it has already written the response.
 func requireSubmittedSignature(w http.ResponseWriter, body approvalBody) bool {
 	if body.ContractHash == "" || body.Signature == "" {
 		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "MISSING_FIELDS",
@@ -581,7 +600,7 @@ func (s *Server) signApprovedItems(ctx context.Context, kind string, c *contract
 // provider's dev Keycloak token>, body {"job_id", "contract_hash",
 // "signature"}. Checks the caller's own datasets on the job's contract (see
 // dataProviderApprovals), verifies the signature (verifySubmittedSignature),
-// stores it on the accepted ones and posts their APD consumer grants; PUT
+// stores it on the accepted ones and posts their APD consumer grants; GET
 // /job/{jobId}/status cross-verifies it again.
 func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.approverFromToken(w, r, "data provider")
@@ -612,7 +631,7 @@ func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Reque
 			own = append(own, e)
 		}
 	}
-	// The signature is verified here, not only at PUT /job/{jobId}/status:
+	// The signature is verified here, not only at GET /job/{jobId}/status:
 	// an approval with a bad signature is refused and nothing is recorded.
 	if overallStatus(own) == db.AuditStatusAccepted {
 		if err := s.verifySubmittedSignature(reqCtx(r), c, caller, body); err != nil {
@@ -626,10 +645,10 @@ func (s *Server) handleDataProviderApproval(w http.ResponseWriter, r *http.Reque
 	}
 	s.markApprovalParticipants(reqCtx(r), db.ParticipantRoleDataProvider, jobID, own, caller)
 	// Accepted: the consumer may use the dataset — its APD consumer grant is
-	// posted now (PUT /job/{jobId}/status re-posts it; APD updates in place).
+	// posted now (GET /job/{jobId}/status re-posts it; APD updates in place).
 	resp["grants"] = s.postConsumerGrants(reqCtx(r), db.AuditTypeDataProvider, jobID, c, own)
 	// ...and its IUDX APD policy, with the caller's own token — so only
-	// here, not again at PUT /job/{jobId}/status (the consumer's token).
+	// here, not again at GET /job/{jobId}/status (the consumer's token).
 	resp["iudx_policies"] = s.postIUDXPolicies(reqCtx(r), jobID, c, own, caller, body)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -704,12 +723,24 @@ func jobContractHash(c *contract.Contract) (string, error) {
 	return hash, nil
 }
 
+// signedJobContractHash is jobContractHash, except that a consumer edit made
+// after the hash was stored (amendmentValid) still yields the stored
+// contract_hash — the one the providers sign — so it needs no re-signing.
+func (s *Server) signedJobContractHash(c *contract.Contract) (string, error) {
+	if c.ContractHash != "" {
+		if hash, err := contract.ComputeHash(*c); err == nil && hash != c.ContractHash && s.amendmentValid(c, hash) {
+			return c.ContractHash, nil
+		}
+	}
+	return jobContractHash(c)
+}
+
 // verifySubmittedSignature checks the caller's approval signature now: the
 // submitted contract_hash must be the one stored with the job's contract
 // (jobContractHash), and the signature over it must verify with the caller's
 // registered public key (PUT /provider-keys/{role}).
 func (s *Server) verifySubmittedSignature(ctx context.Context, c *contract.Contract, caller providerCaller, body approvalBody) error {
-	hash, err := jobContractHash(c)
+	hash, err := s.signedJobContractHash(c)
 	if err != nil {
 		return err
 	}
@@ -768,6 +799,10 @@ func (s *Server) postConsumerGrants(ctx context.Context, kind, jobID string, c *
 			for _, dp := range c.Parties.DataProviders {
 				if partyProviderID(dp) == e.ProviderID && approvalItem(dp) == e.Item {
 					g.ItemName = dp.DatasetName
+					// The grant ends when the provider's consent does.
+					if u := dp.Constraints.ConsentValidUntil; u != nil && (g.ExpiresAt.IsZero() || u.Before(g.ExpiresAt)) {
+						g.ExpiresAt = *u
+					}
 				}
 			}
 		case db.AuditTypeInfraProvider:
@@ -935,7 +970,7 @@ func (s *Server) recordJobApproval(w http.ResponseWriter, r *http.Request, kind,
 	}
 	resp := jobApprovalResponse(kind, jobID, overallStatus(own), st, entries)
 	sig := j{"submitted": signed > 0, "contract_hash": body.ContractHash, "items_signed": signed,
-		"verified_at": "PUT /job/" + jobID + "/status"}
+		"verified_at": "GET /job/" + jobID + "/status"}
 	if kind == db.AuditTypeDataProvider && signed > 0 {
 		// verified before recording (handleDataProviderApproval)
 		sig["verified"] = true
@@ -1002,7 +1037,7 @@ func jobApprovalResponse(kind, jobID, approval string, st jobApprovalState, entr
 	}
 }
 
-// PUT /job/{jobId}/status — Authorization: Bearer <the consumer's dev
+// GET /job/{jobId}/status — Authorization: Bearer <the consumer's dev
 // Keycloak token>: the user who generated the contract (its parties.user.id
 // is their token's sub); anyone else gets 403. The governance layer's
 // cross-verification of the job:
@@ -1022,7 +1057,7 @@ func jobApprovalResponse(kind, jobID, approval string, st jobApprovalState, entr
 // {"status": "not approved", "reasons": [...]} and nothing is created.
 // Re-callable: once approved, it re-verifies, returns the same final
 // contract and re-posts the grants (APD updates them in place).
-func (s *Server) putJobStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) getJobStatus(w http.ResponseWriter, r *http.Request) {
 	_, claims, ok := s.devTokenClaims(w, r, "consumer")
 	if !ok {
 		return
@@ -1120,7 +1155,7 @@ func approvalReasons(st jobApprovalState) []string {
 // signer must be its owner. Returns each party's result and, if any fails,
 // the reasons.
 func (s *Server) verifyJobSignatures(ctx context.Context, c *contract.Contract) ([]partySignatureStatus, []string) {
-	hash, err := jobContractHash(c)
+	hash, err := s.signedJobContractHash(c)
 	if err != nil {
 		return nil, []string{err.Error()}
 	}

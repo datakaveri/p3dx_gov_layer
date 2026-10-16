@@ -47,10 +47,11 @@ type editContractRequest struct {
 }
 
 // PUT /contracts/{contractId} — the consumer who generated a TEE contract
-// edits it in place, under the same contract_id, without rehashing or
-// re-signing. The stored content then no longer matches the hash its data
-// providers signed, so POST /v1/tee/run refuses it
-// (requireAllProvidersSigned) — the edit is detected, not trusted.
+// edits it in place, under the same contract_id, without its data providers
+// re-signing. ContractHash stays the hash they signed; gov_layer signs the
+// edited content's hash as an amendment (amendSign), which the run gate
+// (requireAllProvidersSigned) accepts in its place. A change made any other
+// way (e.g. directly in the DB) carries no valid amendment and is refused.
 func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 	contractID := chi.URLParam(r, "contractId")
 	fail := func(status int, code, msg string) {
@@ -159,8 +160,13 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 		if wl.ID != nil && strings.TrimSpace(*wl.ID) != "" {
 			id := strings.TrimSpace(*wl.ID)
 			known, ok := services.KnownWorkloads[id]
-			if !ok {
-				fail(http.StatusBadRequest, "UNKNOWN_WORKLOAD", "no workload "+id)
+			// if !ok {
+			// 	fail(http.StatusBadRequest, "UNKNOWN_WORKLOAD", "no workload "+id)
+			// 	return
+			// }
+			// A workload outside the catalogue needs its image sent with it.
+			if !ok && (wl.Image == nil || strings.TrimSpace(*wl.Image) == "") {
+				fail(http.StatusBadRequest, "UNKNOWN_WORKLOAD", "no workload "+id+" in the catalogue — send workload.image with it")
 				return
 			}
 			prev := ""
@@ -169,17 +175,30 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 			}
 			if id != prev {
 				changes = append(changes, fmt.Sprintf("workload %q -> %q", prev, id))
-				c.Workload.Image = known.Image
-				c.Workload.Resources = known.Resources
+				if ok {
+					c.Workload.Image = known.Image
+					c.Workload.Resources = known.Resources
+				}
 				if len(c.Parties.ApplicationProviders) > 0 {
 					ap := &c.Parties.ApplicationProviders[0]
-					ap.ID, ap.AppName, ap.ContainerImage = id, id, known.Image
+					ap.ID, ap.AppName, ap.ContainerImage = id, id, c.Workload.Image
 				}
 			}
 		}
 		setStr("workload.image", &c.Workload.Image, wl.Image)
 		setStr("workload.cpu", &c.Workload.Resources.CPU, wl.CPU)
 		setStr("workload.memory", &c.Workload.Resources.Memory, wl.Memory)
+		// Keep the application party's image in step with an image override.
+		if len(c.Parties.ApplicationProviders) > 0 {
+			c.Parties.ApplicationProviders[0].ContainerImage = c.Workload.Image
+		}
+		// (Workload checks dropped: any workload/image may be chosen.)
+		// // The (possibly new) workload must be a known catalogue workload,
+		// // run with that workload's own image.
+		// if err := requireWorkloadAllowed(c); err != nil {
+		// 	fail(http.StatusForbidden, "WORKLOAD_NOT_ALLOWED", teeErrorMessage(err))
+		// 	return
+		// }
 	}
 
 	// Keep what the run actually uses (workload env, job trustee — both
@@ -201,6 +220,14 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// gov_layer accepts the edit: it signs the new content hash as an
+	// amendment, so the providers' signatures over ContractHash still hold.
+	newHash, err := s.amendSign(c)
+	if err != nil {
+		fail(http.StatusInternalServerError, "INTERNAL_ERROR", "edit could not be signed: "+err.Error())
+		return
+	}
+
 	raw, err := json.Marshal(c)
 	if err != nil {
 		fail(http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
@@ -215,17 +242,18 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newHash, _ := contract.ComputeHash(*c)
-	log.Printf("[CONTRACT-EDIT] contract %s edited by consumer %s: %s; signed hash %s, content now hashes to %s — provider signatures will no longer match",
+	// newHash, _ := contract.ComputeHash(*c)
+	log.Printf("[CONTRACT-EDIT] contract %s edited by consumer %s: %s; signed hash %s, content now hashes to %s — amendment signed by gov_layer, provider signatures still valid",
 		contractID, sub, strings.Join(changes, ", "), c.ContractHash, newHash)
 	editor, _ := claims["preferred_username"].(string)
 	if editor == "" {
 		editor = sub
 	}
 	detail := "Changed after signing: " + strings.Join(changes, ", ")
-	if newHash != c.ContractHash {
-		detail += " — signatures no longer match"
-	}
+	// if newHash != c.ContractHash {
+	// 	detail += " — signatures no longer match"
+	// }
+	detail += " — accepted by the governance layer, no re-signing needed"
 	s.recordContractEvent(reqCtx(r), c, db.ContractEventEdited, detail, editor)
 
 	writeJSON(w, http.StatusOK, j{
@@ -235,6 +263,8 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 		"signed_hash":  c.ContractHash,
 		"content_hash": newHash,
 		"hash_matches": newHash == c.ContractHash,
-		"message":      "contract updated; it no longer matches what its data providers signed, so it cannot be run",
+		"amended":      true,
+		// "message":      "contract updated; it no longer matches what its data providers signed, so it cannot be run",
+		"message": "contract updated; no re-signing needed — it can be run with the new details",
 	})
 }

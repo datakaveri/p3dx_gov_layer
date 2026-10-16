@@ -40,6 +40,10 @@ RUN mkdir -p /app/keys /app/data && chown -R gov:gov /app
 USER gov
 
 VOLUME ["/app/keys", "/app/data"]
+# Approve TEE/SMPC jobs on the data-provider approval alone (no infra selected).
+# Overridable at runtime (--env-file / -e REQUIRE_INFRA_APPROVAL=true).
+ENV REQUIRE_INFRA_APPROVAL=false
+
 EXPOSE 8083
 
 ENTRYPOINT ["/app/gov-layer"]
