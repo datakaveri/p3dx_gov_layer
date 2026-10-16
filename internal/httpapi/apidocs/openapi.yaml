@@ -1155,6 +1155,8 @@ paths:
           - `provider_id` : Optional, overrides the provider named by the APD policy
           - `compute_choice` : Optional, defaulted per technique
           - `infra_ids` : The selected infrastructures; SMPC needs exactly 2
+          - `purpose` : The specific purpose of processing, shown to data providers in the DPDP Rule 3 consent
+            notice and covered by the contract hash. Required for TEE; at most 1000 characters
         required: true
         content:
           application/json:
@@ -1187,6 +1189,9 @@ paths:
                   type: array
                   items:
                     type: string
+                purpose:
+                  type: string
+                  maxLength: 1000
               required:
                 - datasets
                 - technique
@@ -1437,6 +1442,83 @@ paths:
               --header 'Content-Type: application/json' \
               --data-raw '<payload>'
 
+  /api/v1/contracts/{contractId}/withdraw-consent:
+    post:
+      tags:
+        - Contract Signing
+      summary: Withdraw Consent
+      description: |
+        A data provider withdraws the consent they gave by signing a TEE contract (DPDP Act 2023 s.6(4),
+        DPDP Rules 2025 Rule 3(c)(i)).
+
+        * The provider is the user in their own token.
+        * Their signature on every party of theirs is cleared and `withdrawn_at` recorded. The contract hash does
+          not change, so they can sign it again later to give consent again.
+        * Any further TEE run on the contract is refused by the run gate with `consent withdrawn`. A run already
+          in progress is not stopped.
+        * TEE contracts only.
+      operationId: post-contract-withdraw-consent
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      requestBody:
+        description: |
+          - `notification_id` : Optional, the sign request to mark `withdrawn`
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notification_id:
+                  type: string
+            examples:
+              Withdraw Consent:
+                value:
+                  notification_id: 9b2e7c1a-0d4f-4e3b-a6c5-1f2e3d4c5b6a
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              examples:
+                Example:
+                  value:
+                    status: withdrawn
+                    message: consent withdrawn
+                    withdrawn_at: '2026-10-15T10:00:00Z'
+        '400':
+          description: |-
+            Bad Request
+            - The contract is not a TEE contract
+        '401':
+          description: |-
+            Unauthorized
+            - Token missing, invalid or expired
+        '403':
+          description: |-
+            Forbidden
+            - The caller is not a data provider on this contract
+        '404':
+          description: |-
+            Not Found
+            - No such contract
+        '409':
+          description: |-
+            Conflict
+            - The caller has not signed this contract, so there is nothing to withdraw
+        '500':
+          description: Internal Server Error
+      security:
+        - authorization: []
+      x-codeSamples:
+        - lang: cURL
+          label: Withdraw consent
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>/withdraw-consent' \
+              --header 'Authorization: Bearer <tokenValue>' \
+              --header 'Content-Type: application/json' \
+              --data-raw '<payload>'
+
   /api/v1/contracts/{contractId}/signatures:
     get:
       tags:
@@ -1461,6 +1543,107 @@ paths:
           label: Get contract signatures
           source: |
             curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>/signatures'
+
+  /api/v1/contracts/{contractId}:
+    put:
+      tags:
+        - Contract Signing
+      summary: Edit Contract
+      description: |
+        Lets the consumer who generated a TEE contract edit it in place (same contract_id). Every field is optional; omitted fields are unchanged.
+        Only lifecycle valid_from/valid_until, the consumer's name, each data provider's dataset name/version, data URL and key resource path,
+        and the workload image/CPU/memory can be changed — never the contract id, hash, signatures, technique or party identities.
+        The contract is not rehashed or re-signed, so it no longer matches the hash its data providers signed,
+        and `POST /v1/tee/run` then refuses it with `CONTRACT_NOT_SIGNED`.
+      operationId: edit-contract
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                lifecycle:
+                  type: object
+                  properties:
+                    valid_from:
+                      type: string
+                      format: date-time
+                    valid_until:
+                      type: string
+                      format: date-time
+                user:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                data_providers:
+                  type: array
+                  description: Positional — entry i edits parties.data_providers[i].
+                  items:
+                    type: object
+                    properties:
+                      dataset_name:
+                        type: string
+                      dataset_version:
+                        type: string
+                      data_url:
+                        type: string
+                      key_resource_path:
+                        type: string
+                workload:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      description: Switch to another workload from GET /workloads.
+                    image:
+                      type: string
+                    cpu:
+                      type: string
+                    memory:
+                      type: string
+      responses:
+        '200':
+          description: Contract updated; `changes` lists each edit and `hash_matches` is false once the content differs from the signed hash.
+        '400':
+          description: Nothing changed, invalid value, or not a TEE contract.
+        '401':
+          description: Missing or invalid Keycloak token.
+        '403':
+          description: Caller is not the consumer who generated the contract.
+        '404':
+          $ref: '#/components/responses/ContractNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: cURL
+          label: Edit contract
+          source: |
+            curl --location --request PUT 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/<contractId>' \
+            --header 'Authorization: Bearer <consumer token>' \
+            --header 'Content-Type: application/json' \
+            --data '{"workload": {"cpu": "2"}, "lifecycle": {"valid_until": "2027-06-30T00:00:00Z"}}'
+
+  /api/v1/workloads:
+    get:
+      tags:
+        - Contract Signing
+      summary: List Workloads
+      description: |
+        Every workload a TEE contract can run (gov_layer's KnownWorkloads): `id` (sent as application_id / workload.id), `name`, `image`, `cpu`, `memory`.
+      operationId: list-workloads
+      responses:
+        '200':
+          description: The workload catalogue.
+      security: []
+      x-codeSamples:
+        - lang: cURL
+          label: List workloads
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/workloads'
 
   /api/v1/contracts/by-session/{sessionId}/signatures:
     get:

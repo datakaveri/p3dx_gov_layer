@@ -146,6 +146,38 @@ func TestVerifyContractSignatures(t *testing.T) {
 	}
 }
 
+// A withdrawn signature fails the run gate with "consent withdrawn", leaves
+// the hash unchanged, and re-signing the same hash restores consent.
+func TestWithdrawnConsentFailsVerification(t *testing.T) {
+	alice, alicePub := newRSAKey(t)
+	bob, bobPub := newRSAKey(t)
+	srv := newTestServer(nil)
+	srv.publicKeys = stubKeys{"alice": alicePub, "bob": bobPub}
+	ctx := context.Background()
+
+	c := twoProviderContract(t, srv)
+	sign(&c, 0, "alice", signWith(t, alice, c.ContractHash))
+	sign(&c, 1, "bob", signWith(t, bob, c.ContractHash))
+
+	now := time.Now()
+	c.Parties.DataProviders[1].Signature = contract.Signature{Signer: "bob", WithdrawnAt: &now}
+	parties, hashOK, all := srv.verifyContractSignatures(ctx, &c)
+	if !hashOK {
+		t.Fatal("withdrawing changed the contract hash")
+	}
+	if all {
+		t.Fatal("contract with a withdrawn consent passed verification")
+	}
+	if parties[1].Error != "consent withdrawn" {
+		t.Fatalf("bob's status error = %q, want %q", parties[1].Error, "consent withdrawn")
+	}
+
+	sign(&c, 1, "bob", signWith(t, bob, c.ContractHash))
+	if _, _, all := srv.verifyContractSignatures(ctx, &c); !all {
+		t.Fatal("re-signing after withdrawal did not restore consent")
+	}
+}
+
 // The governance signature is over the hash and doesn't change it, so
 // signing never invalidates the hash being signed.
 func TestGovernanceSignatureLeavesHashStable(t *testing.T) {

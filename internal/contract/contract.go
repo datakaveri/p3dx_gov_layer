@@ -38,6 +38,10 @@ type Signature struct {
 	Algorithm  string     `json:"algorithm,omitempty"`   // e.g. "RSASSA-PKCS1-v1_5-SHA256"
 	SignedHash string     `json:"signed_hash,omitempty"` // the ContractHash string that was signed
 	Value      string     `json:"value,omitempty"`       // base64 signature bytes
+	// WithdrawnAt is set when the signer withdraws consent
+	// (POST /contracts/{id}/withdraw-consent, DPDP Act s.6(4)). Value is
+	// cleared at the same time, so the run gate treats the party as unsigned.
+	WithdrawnAt *time.Time `json:"withdrawn_at,omitempty"`
 }
 
 // Constraints bounds who/what may access a party's contribution.
@@ -209,6 +213,11 @@ type Contract struct {
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`
 	ComputeChoice string      `json:"compute_choice"`
+	// Purpose is the consumer's stated purpose for processing, shown to data
+	// providers in the DPDP Rule 3 consent notice. It is covered by the
+	// contract hash, so a provider's signature binds them to this purpose
+	// only. omitempty keeps older contracts' hashes stable.
+	Purpose string `json:"purpose,omitempty"`
 	// Workload is set when a known workload (e.g. MNIST) was selected.
 	// omitempty keeps older contracts' hashes stable.
 	Workload *Workload `json:"workload,omitempty"`

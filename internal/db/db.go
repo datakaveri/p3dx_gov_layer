@@ -230,6 +230,21 @@ func (d *DB) migrate(ctx context.Context) error {
 		// unaffected.
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP`,
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS tee_enabled_at TIMESTAMP`,
+		// What happened to each contract, in order (contract_events.go) —
+		// generated, sign requested, signed, edited, run started / refused /
+		// failed — for the data provider's live Audit page. Append-only, so
+		// it keeps the history even after a draft row is regenerated.
+		`CREATE TABLE IF NOT EXISTS contract_events (
+			id BIGSERIAL PRIMARY KEY,
+			contract_id TEXT NOT NULL,
+			job_id TEXT NOT NULL DEFAULT '',
+			event TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS contract_events_job_idx ON contract_events(job_id)`,
+		`CREATE INDEX IF NOT EXISTS contract_events_contract_idx ON contract_events(contract_id)`,
 		// A job's final contract (final_contracts.go): the governance-signed
 		// contract, stored once at PUT /job/{jobId}/status after every
 		// approval, the contract hash and every signature verified. Its own
