@@ -19,16 +19,22 @@ type KnownWorkload struct {
 var KnownWorkloads = map[string]KnownWorkload{
 	"mnist": {
 		Name:      "MNIST",
-		Image:     "docker.io/rohithvaidya/mnist-vault-workload:1.8",
+		// Image:     "docker.io/rohithvaidya/mnist-vault-workload:1.8",
+		Image:     "docker.io/rohithvaidya/mnist-vault-workload@sha256:e155df758090022a9ca9d1ff6574bf7e5c3d1975c7e14f5d62f4a11054bbddd8",
+		Resources: contract.WorkloadResources{CPU: "250m", Memory: "512Mi"},
+	},
+	"regression": {
+		Name:      "Regression",
+		Image:     "docker.io/rohithvaidya/logreg-workload@sha256:5ad1cbf6079130b3f1ae527246ebf629ca435b919ed1ca9e39c9b7e780df5525",
 		Resources: contract.WorkloadResources{CPU: "250m", Memory: "512Mi"},
 	},
 	// Placeholder workload for testing the TEE flow (e.g. edit -> run
-	// refused) without the MNIST image.
-	"dummy": {
-		Name:      "Dummy",
-		Image:     "docker.io/library/busybox:1.36",
-		Resources: contract.WorkloadResources{CPU: "100m", Memory: "128Mi"},
-	},
+	// refused) without the MNIST image — removed for now.
+	// "dummy": {
+	// 	Name:      "Dummy",
+	// 	Image:     "docker.io/library/busybox:1.36",
+	// 	Resources: contract.WorkloadResources{CPU: "100m", Memory: "128Mi"},
+	// },
 }
 
 // WorkloadInfo is one KnownWorkloads entry as listed by GET /workloads.
