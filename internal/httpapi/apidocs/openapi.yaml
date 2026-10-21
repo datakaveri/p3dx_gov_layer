@@ -146,7 +146,7 @@ paths:
         signatures from this provider are verified against it.
 
         * The key is stored under the username in the caller's token, never one from the body.
-        * The caller must hold the `{role}` realm role.
+        * The caller must hold the `{role}` realm role. A dev Keycloak token's `provider` role also counts as `data-provider`.
         * The key must be an RSA public key of at least 2048 bits, in SPKI PEM form (`-----BEGIN PUBLIC KEY-----`).
         * The key is per user: one key serves both provider roles.
         * `rotated` is `true` when an existing key was replaced.
@@ -2366,6 +2366,7 @@ paths:
       description: |
         Lists every job (contract) a user takes part in, as its consumer or as a data / infra provider, newest first,
         with their status on each.
+        When `userId` is the caller's own (token `sub`, username or email), jobs are also matched by the token's username and email.
       operationId: get-user-jobs
       parameters:
         - name: userId
@@ -2443,6 +2444,8 @@ paths:
       description: |
         Lists the jobs (contracts) the user created, as their consumer, newest first, with their status on each.
         Only the user's `consumer` entry is in each job's `participation`.
+        Each job's `datasets` lists the dataset (id and name) of every data provider on its contract.
+        When `userId` is the caller's own (token `sub`, username or email), jobs are also matched by the token's username and email.
       operationId: get-consumer-jobs
       parameters:
         - name: userId
@@ -2491,6 +2494,10 @@ paths:
                             username: bob
                             status: created
                             updated_at: '2026-10-14T10:10:00Z'
+                        datasets:
+                          - dataset_id: 8b95ab80-2aaf-4636-a65e-7f2563d0d371
+                            dataset_name: mnist-part-1
+                            provider_id: provider-alice
         '400':
           description: |-
             Bad Request
@@ -2521,6 +2528,9 @@ paths:
         Lists the jobs (contracts) the user is requested on as a data provider and has not yet approved or rejected,
         newest first. Each job's `participation` holds only the user's `data-provider` entries with `status` = `requested`;
         once they approve or reject the job (`POST /job/approval/data-provider`) it no longer appears. FL sessions are not listed.
+        Each job's `datasets` lists the dataset (id and name) of every data provider on its contract.
+        When `userId` is the caller's own (token `sub`, username or email), jobs are also matched by the token's username and email,
+        so a provider sees the jobs they are requested on before registering a public key.
       operationId: get-provider-jobs
       parameters:
         - name: userId
@@ -2571,6 +2581,10 @@ paths:
                             item_name: Heart Disease Records
                             status: requested
                             updated_at: '2026-10-14T10:10:00Z'
+                        datasets:
+                          - dataset_id: ds-1
+                            dataset_name: Heart Disease Records
+                            provider_id: provider-alice
         '400':
           description: |-
             Bad Request
@@ -3725,6 +3739,19 @@ components:
               updated_at:
                 type: string
                 format: date-time
+        datasets:
+          type: array
+          description: The datasets on the job's contract. Only returned by `GET /jobs/consumer/{userId}` and `GET /jobs/provider/{userId}`.
+          items:
+            type: object
+            properties:
+              dataset_id:
+                type: string
+                description: Catalogue id of the dataset (empty if the contract has none)
+              dataset_name:
+                type: string
+              provider_id:
+                type: string
     FinalModel:
       type: object
       properties:
