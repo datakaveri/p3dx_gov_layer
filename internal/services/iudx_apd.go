@@ -51,7 +51,28 @@ func BuildIUDXPolicy(in IUDXPolicyInput) map[string]any {
 	if len(c.Parties.ApplicationProviders) > 0 && c.Parties.ApplicationProviders[0].ContainerImage != "" {
 		workload["image"] = c.Parties.ApplicationProviders[0].ContainerImage
 	}
+	// The contract's own workload (known workloads, e.g. MNIST) wins over the
+	// application provider's image and the infra's resource allocation.
+	if c.Workload != nil {
+		if c.Workload.Image != "" {
+			workload["image"] = c.Workload.Image
+		}
+		r := c.Workload.Resources
+		res := map[string]any{}
+		if r.CPU != "" {
+			res["cpu"] = r.CPU
+		}
+		if r.Memory != "" {
+			res["memory"] = r.Memory
+		}
+		if len(res) > 0 {
+			workload["resources"] = res
+		}
+	}
 	for _, ip := range c.Parties.InfraProviders {
+		if _, set := workload["resources"]; set {
+			break
+		}
 		ra := ip.ResourceAllocation
 		if ra.CPUCores > 0 || ra.RAMMB > 0 {
 			res := map[string]any{}
@@ -65,8 +86,15 @@ func BuildIUDXPolicy(in IUDXPolicyInput) map[string]any {
 			break
 		}
 	}
+	env := map[string]any{}
 	if dp.DataURL != "" {
-		workload["env"] = map[string]any{"DATASET_URL": dp.DataURL}
+		env["DATASET_URL"] = dp.DataURL
+	}
+	if c.Parties.User.DatablobURL != "" {
+		env["RESULT_URL"] = c.Parties.User.DatablobURL
+	}
+	if len(env) > 0 {
+		workload["env"] = env
 	}
 	if len(workload) > 0 {
 		constraints["workload"] = workload

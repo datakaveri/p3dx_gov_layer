@@ -57,7 +57,7 @@ type Server struct {
 
 // New builds the Server.
 func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *services.GovernanceKey, govCA *x509.Certificate, govCAPEM []byte) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg,
 		db:  database,
 		kc:  kc,
@@ -71,6 +71,9 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *servi
 		govCAPEM:     govCAPEM,
 		gatewayStore: database,
 	}
+	// Pick up TEE runs whose outcome wasn't recorded before a restart.
+	go s.resumeTEERunWatchers()
+	return s
 }
 
 // Handler returns the root http.Handler with CORS + the routes mounted at both
@@ -84,6 +87,8 @@ func (s *Server) Handler() http.Handler {
 	// {TEE_ORCHESTRATOR_URL}/v1/tee/... so these must not sit under /api/v1.
 	s.registerTEERoutes(root)
 	s.registerTEESessionRoutes(root)
+	// API specs page (apidocs.go), also at the root: GET /apis.
+	s.registerAPIDocsRoutes(root)
 	return root
 }
 
@@ -135,14 +140,23 @@ func (s *Server) registerRoutes(r chi.Router) {
 	// provider posts their RSA signature over a contract's hash; the
 	// signatures routes report who has signed (FL looks it up by session).
 	r.Post("/contracts/{contractId}/sign", s.handleSignContract)
+	r.Post("/contracts/{contractId}/withdraw-consent", s.handleWithdrawConsent)
+	r.Post("/contracts/{contractId}/consent-expiry", s.handleSetConsentExpiry)
+	r.Get("/contracts/{contractId}", s.getConsumerContract)
 	r.Get("/contracts/{contractId}/signatures", s.getContractSignatures)
+	// Consumer edit of a TEE contract, in place and unsigned
+	// (contract_edit.go) — the run gate then refuses it.
+	r.Put("/contracts/{contractId}", s.editContract)
+	// Workload catalogue (workloads_catalog.go) for the UI's pickers.
+	r.Get("/workloads", s.listWorkloads)
 	r.Get("/contracts/by-session/{sessionId}/signatures", s.getSessionContractSignatures)
 
 	// Job approvals (job_approval.go): role + catalogue checks for every
 	// data/infra provider on a contract's job_id, recorded in the audit table.
 	r.Post("/job/approval/data-provider", s.handleDataProviderApproval)
 	r.Post("/job/approval/infra-provider", s.handleInfraProviderApproval)
-	r.Put("/job/{jobId}/status", s.putJobStatus)
+	// r.Put("/job/{jobId}/status", s.putJobStatus)
+	r.Get("/job/{jobId}/status", s.getJobStatus)
 
 	// Flotilla join gateway (gateway_certs.go): the FL orchestrator's service
 	// account requests a TLS server certificate for an FL session's gateway,
@@ -151,6 +165,13 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Post("/gateway-certs", s.postGatewayCert)
 	r.Get("/governance/ca-cert", s.getGovernanceCACert)
 	r.Post("/job/{jobId}/tee", s.enableJobTEE)
+	// The job's contract + its contract_hash (job_participants.go).
+	r.Get("/job/{jobId}/contract/{contractId}", s.getJobContract)
+	// Every job (contract) a user takes part in (job_participants.go).
+	r.Get("/jobs/user/{userId}", s.getUserJobs)
+	// The jobs a user created (consumer) / is requested on as a data provider.
+	r.Get("/jobs/consumer/{userId}", s.getConsumerJobs)
+	r.Get("/jobs/provider/{userId}", s.getProviderJobs)
 	//for the model.go
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)

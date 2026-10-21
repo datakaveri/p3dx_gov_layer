@@ -326,3 +326,42 @@ func TestPostConsumerGrants(t *testing.T) {
 		map[string]any{"itemId": "infra-1", "provider_id": "provider-ivan", "dataset_id": nil},
 		map[string]any{"policy_type": "consumer-grant", "item_type": "infra", "job_id": "job-1", "contract_id": "contract-1", "consumer": "consumer-sub", "infra_provider": "provider-ivan", "infra_id": "infra-1", "infra_name": "Pune DC"})
 }
+
+// With REQUIRE_INFRA_APPROVAL off, a TEE/SMPC contract naming datasets but
+// only the placeholder infra still goes through job approval (so
+// GET /job/{jobId}/status answers it instead of NO_APPROVAL_NEEDED); FL never
+// does, and with infra approval required it still needs real infra.
+func TestJobApprovalRequiredWithoutInfra(t *testing.T) {
+	teeNoInfra := &contract.Contract{Technique: "TEE", Parties: contract.Parties{
+		DataProviders:  []contract.DataProviderParty{{ID: "provider-a"}},
+		InfraProviders: []contract.InfraProviderParty{{Name: "placeholder"}},
+	}}
+	flNoInfra := &contract.Contract{Technique: "FL", Parties: contract.Parties{
+		DataProviders: []contract.DataProviderParty{{ID: "provider-a"}},
+	}}
+	teeNoData := &contract.Contract{Technique: "TEE", Parties: contract.Parties{
+		InfraProviders: []contract.InfraProviderParty{{Name: "placeholder"}},
+	}}
+	off := &Server{cfg: &config.Config{RequireInfraApproval: false}}
+	on := &Server{cfg: &config.Config{RequireInfraApproval: true}}
+	for _, tc := range []struct {
+		name string
+		s    *Server
+		c    *contract.Contract
+		want bool
+	}{
+		// No infra: always signed directly, even with infra approval off.
+		// {"TEE, no infra, infra approval off", off, teeNoInfra, true},
+		{"TEE, no infra, infra approval off", off, teeNoInfra, false},
+		{"real infra, infra approval off", off, approvalContract(), true},
+		{"TEE, no infra, infra approval on", on, teeNoInfra, false},
+		{"TEE, no infra, no config", &Server{}, teeNoInfra, false},
+		{"FL, infra approval off", off, flNoInfra, false},
+		{"TEE, no datasets", off, teeNoData, false},
+		{"real infra", on, approvalContract(), true},
+	} {
+		if got := tc.s.jobApprovalRequired(tc.c); got != tc.want {
+			t.Errorf("%s: jobApprovalRequired = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

@@ -158,6 +158,11 @@ func (s *Server) postReceiver(ctx context.Context, url string, headers map[strin
 func (s *Server) registerTEERoutes(r chi.Router) {
 	r.Route("/v1/tee", func(r chi.Router) {
 		r.Post("/provision", s.provisionTEE)
+		// Run TEE: CreateJob on the Kata coordinator via grpcurl (job_tee.go).
+		r.Post("/run", s.runTEEJob)
+		// Run TEE progress: GetJob on the coordinator, and the job's result.
+		r.Get("/jobs/{jobId}", s.getTEEJob)
+		r.Get("/jobs/{jobId}/result", s.getTEEJobResult)
 
 		r.Route("/{teeId}", func(r chi.Router) {
 			r.Get("/state", s.teeState)

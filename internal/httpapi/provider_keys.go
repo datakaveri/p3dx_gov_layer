@@ -157,10 +157,12 @@ func (s *Server) getProviderKeyStatus(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := s.db.ProviderPublicKey(reqCtx(r), username)
+	pemKey, err := s.db.ProviderPublicKey(reqCtx(r), username)
 	switch {
 	case err == nil:
-		writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "exists": true})
+		// The public half only (never a private key) — lets the provider
+		// download the key the platform verifies their signatures with.
+		writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "exists": true, "public_key": pemKey})
 	case errors.Is(err, db.ErrNoPublicKey):
 		writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "exists": false})
 	default:

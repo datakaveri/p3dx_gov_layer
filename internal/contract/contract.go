@@ -38,12 +38,20 @@ type Signature struct {
 	Algorithm  string     `json:"algorithm,omitempty"`   // e.g. "RSASSA-PKCS1-v1_5-SHA256"
 	SignedHash string     `json:"signed_hash,omitempty"` // the ContractHash string that was signed
 	Value      string     `json:"value,omitempty"`       // base64 signature bytes
+	// WithdrawnAt is set when the signer withdraws consent
+	// (POST /contracts/{id}/withdraw-consent, DPDP Act s.6(4)). Value is
+	// cleared at the same time, so the run gate treats the party as unsigned.
+	WithdrawnAt *time.Time `json:"withdrawn_at,omitempty"`
 }
 
 // Constraints bounds who/what may access a party's contribution.
 type Constraints struct {
 	AccessibilityLevel string   `json:"accessibility_level"`
 	RestrictedTo       []string `json:"restricted_to"`
+	// ConsentValidUntil is when a data provider's consent ends, set by that
+	// provider before signing (POST /contracts/{id}/consent-expiry). No run
+	// starts after it. omitempty keeps older contracts' hashes stable.
+	ConsentValidUntil *time.Time `json:"consent_valid_until,omitempty"`
 }
 
 // UserParty is the contract's requesting party (the FL output owner, or the
@@ -109,6 +117,29 @@ type ApplicationProviderParty struct {
 
 // Attestation describes the remote-attestation requirement for an infra
 // provider's compute environment.
+// Workload is what the TEE runs for the selected workload (see
+// services.KnownWorkloads): its image and CPU/memory request, as Kubernetes
+// quantities (e.g. "250m"/"512Mi").
+type Workload struct {
+	Image     string            `json:"image"`
+	Resources WorkloadResources `json:"resources"`
+	// Env is passed to the workload container: DATASET_URL (the first
+	// dataset's data_url) and RESULT_URL (the consumer's datablob_url).
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// JobTrustee is the contract-level trustee the TEE job uses — the first
+// dataset's trustee, in the coordinator's camelCase CreateJob shape.
+type JobTrustee struct {
+	KBSURL          string `json:"kbsUrl"`
+	KeyResourcePath string `json:"keyResourcePath"`
+}
+
+type WorkloadResources struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
+}
+
 type Attestation struct {
 	Required bool   `json:"required"`
 	Service  string `json:"service"`
@@ -164,6 +195,11 @@ type Lifecycle struct {
 	CreatedAt  time.Time `json:"created_at"`
 	ValidFrom  time.Time `json:"valid_from"`
 	ValidUntil time.Time `json:"valid_until"`
+	// RequestedValidUntil is the end the consumer's contract was generated
+	// with, kept once a data provider's consent expiry shortens ValidUntil,
+	// so a later expiry change is still bounded by (and can return to) it.
+	// omitempty keeps older contracts' hashes stable.
+	RequestedValidUntil *time.Time `json:"requested_valid_until,omitempty"`
 }
 
 // SessionInfo identifies the request/session the contract was assembled for.
@@ -186,6 +222,18 @@ type Contract struct {
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`
 	ComputeChoice string      `json:"compute_choice"`
+	// Purpose is the consumer's stated purpose for processing, shown to data
+	// providers in the DPDP Rule 3 consent notice. It is covered by the
+	// contract hash, so a provider's signature binds them to this purpose
+	// only. omitempty keeps older contracts' hashes stable.
+	Purpose string `json:"purpose,omitempty"`
+	// Workload is set when a known workload (e.g. MNIST) was selected.
+	// omitempty keeps older contracts' hashes stable.
+	Workload *Workload `json:"workload,omitempty"`
+	// Trustee and CallbackURL complete the coordinator's CreateJob shape
+	// (contractId/workload/trustee/callbackUrl). Set only alongside Workload.
+	Trustee     *JobTrustee `json:"trustee,omitempty"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
 	Parties       Parties     `json:"parties"`
 	SessionInfo   SessionInfo `json:"session_info"`
 	ContractHash  string      `json:"contract_hash,omitempty"`
@@ -194,6 +242,13 @@ type Contract struct {
 	// hash came from gov_layer before signing it. Blanked by ComputeHash like
 	// the party signatures.
 	GovernanceSignature *Signature `json:"governance_signature,omitempty"`
+	// Amendment is gov_layer's signature over the content hash of a contract
+	// its consumer edited after it was signed (PUT /contracts/{id}). Its
+	// SignedHash is the edited content's hash; ContractHash stays the hash the
+	// providers signed, so their signatures keep verifying and the edit needs
+	// no re-signing. Blanked by ComputeHash; omitempty keeps older contracts'
+	// JSON unchanged.
+	Amendment *Signature `json:"amendment,omitempty"`
 }
 
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with
@@ -204,6 +259,7 @@ type Contract struct {
 func ComputeHash(c Contract) (string, error) {
 	c.ContractHash = ""
 	c.GovernanceSignature = nil
+	c.Amendment = nil
 	c = withoutSignatures(c)
 	b, err := json.Marshal(c)
 	if err != nil {
@@ -243,4 +299,43 @@ func withoutSignatures(c Contract) Contract {
 	c.Parties.InfraProviders = infraProviders
 
 	return c
+}
+
+// SubContract is the slice of a contract the Kata coordinator runs — the
+// body of CoordinatorService/CreateJob ({"contract": {...}}), in its
+// camelCase JSON shape.
+type SubContract struct {
+	Contract SubContractBody `json:"contract"`
+}
+
+type SubContractBody struct {
+	ContractID  string      `json:"contractId"`
+	Workload    *Workload   `json:"workload"`
+	Trustee     *JobTrustee `json:"trustee"`
+	CallbackURL string      `json:"callbackUrl,omitempty"`
+}
+
+// NewSubContract builds the CreateJob sub-contract from c. missing names
+// every required field c lacks; when it is non-empty the job must not be
+// sent.
+func NewSubContract(c *Contract) (sub SubContract, missing []string) {
+	if c.ContractID == "" {
+		missing = append(missing, "contract_id")
+	}
+	if c.Workload == nil || c.Workload.Image == "" {
+		missing = append(missing, "workload.image")
+	}
+	if c.Workload == nil || c.Workload.Env["DATASET_URL"] == "" {
+		missing = append(missing, "workload.env.DATASET_URL")
+	}
+	if c.Trustee == nil || c.Trustee.KBSURL == "" || c.Trustee.KeyResourcePath == "" {
+		missing = append(missing, "trustee")
+	}
+	sub.Contract = SubContractBody{
+		ContractID:  c.ContractID,
+		Workload:    c.Workload,
+		Trustee:     c.Trustee,
+		CallbackURL: c.CallbackURL,
+	}
+	return sub, missing
 }

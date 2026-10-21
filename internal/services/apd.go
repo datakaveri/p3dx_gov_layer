@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/smtp"
@@ -264,8 +265,12 @@ func fetchProviderPolicy(itemID, policyID string) (map[string]interface{}, error
 		return data, nil
 	}
 
-	return nil, fmt.Errorf("no policy found in APD for item %q", itemID)
+	return nil, fmt.Errorf("%w for item %q", ErrPolicyNotFound, itemID)
 }
+
+// ErrPolicyNotFound: APD has no policy for the item (every lookup path 404'd)
+// — as opposed to APD being unreachable or erroring.
+var ErrPolicyNotFound = errors.New("no policy found in APD")
 
 // IsPrivateDataset reports whether an APD policy marks its dataset private,
 // checking the common field names APD may use for the designation.

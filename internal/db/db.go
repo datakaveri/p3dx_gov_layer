@@ -230,8 +230,23 @@ func (d *DB) migrate(ctx context.Context) error {
 		// unaffected.
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS finalized_at TIMESTAMP`,
 		`ALTER TABLE contracts ADD COLUMN IF NOT EXISTS tee_enabled_at TIMESTAMP`,
+		// What happened to each contract, in order (contract_events.go) —
+		// generated, sign requested, signed, edited, run started / refused /
+		// failed — for the data provider's live Audit page. Append-only, so
+		// it keeps the history even after a draft row is regenerated.
+		`CREATE TABLE IF NOT EXISTS contract_events (
+			id BIGSERIAL PRIMARY KEY,
+			contract_id TEXT NOT NULL,
+			job_id TEXT NOT NULL DEFAULT '',
+			event TEXT NOT NULL,
+			detail TEXT NOT NULL DEFAULT '',
+			actor TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS contract_events_job_idx ON contract_events(job_id)`,
+		`CREATE INDEX IF NOT EXISTS contract_events_contract_idx ON contract_events(contract_id)`,
 		// A job's final contract (final_contracts.go): the governance-signed
-		// contract, stored once at PUT /job/{jobId}/status after every
+		// contract, stored once at GET /job/{jobId}/status after every
 		// approval, the contract hash and every signature verified. Its own
 		// table so it stays as created while the contracts row moves on.
 		`CREATE TABLE IF NOT EXISTS final_contracts (
@@ -254,6 +269,28 @@ func (d *DB) migrate(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+		// Who takes part in each job (job_participants.go): one row per
+		// consumer, and per data / infra provider and the dataset / infra they
+		// bring, with that user's status on the job. Written as the job moves
+		// (generate-contract, approvals, signing, final, TEE) so
+		// GET /jobs/user/{userId} can list a user's contracts.
+		`CREATE TABLE IF NOT EXISTS job_participants (
+			job_id TEXT NOT NULL,
+			contract_id TEXT NOT NULL,
+			technique TEXT NOT NULL DEFAULT '',
+			role TEXT NOT NULL,
+			participant_id TEXT NOT NULL,
+			user_id TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
+			item_id TEXT NOT NULL DEFAULT '',
+			item_name TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (job_id, role, participant_id, item_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS job_participants_participant_idx ON job_participants(lower(participant_id))`,
+		`CREATE INDEX IF NOT EXISTS job_participants_user_idx ON job_participants(lower(user_id))`,
 		// One row per Flotilla gateway TLS certificate issued by the
 		// governance CA (POST /gateway-certs): which FL contract it was issued
 		// for, to whom (requested_by = the orchestrator token's azp), and when
@@ -283,6 +320,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table contracts ready")
 	log.Println("[DATABASE] Table vm_registry ready")
 	log.Println("[DATABASE] Table provider_public_keys ready")
+	log.Println("[DATABASE] Table job_participants ready")
 	log.Println("[DATABASE] Table gateway_certs ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
