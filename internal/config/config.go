@@ -6,6 +6,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -120,6 +121,24 @@ type Config struct {
 	// GovSigningKeyPath is where gov_layer's own contract-signing RSA key pair
 	// lives (PKCS#8 PEM). Generated on first start if missing.
 	GovSigningKeyPath string // GOV_SIGNING_KEY_PATH (default keys/governance_signing_key.pem)
+
+	// --- Flotilla join gateway (httpapi/gateway_certs.go) ---
+	// The governance key above doubles as a CA: its self-signed certificate
+	// lives at GovCACertPath (generated on first start, or regenerated when it
+	// no longer matches the key) and signs each FL session gateway's TLS
+	// certificate. Only the FL orchestrator's service account (client
+	// OrchestratorClientID holding realm role OrchestratorRole) may request
+	// one. Tokens minted for the Flotilla VMs (azp FlotillaVMClientID) are
+	// refused by every provider-token endpoint.
+	GovCACertPath        string // GOV_CA_CERT_PATH (default ./keys/governance_ca.pem)
+	OrchestratorClientID string // ORCHESTRATOR_CLIENT_ID (default p3dx-fl-orchestrator)
+	OrchestratorRole     string // ORCHESTRATOR_ROLE (default fl-orchestrator)
+	FlotillaVMClientID   string // FLOTILLA_VM_CLIENT_ID (default flotilla-vm)
+
+	// FLContractValidity is how long an FL roster contract is valid from the
+	// moment it is built (Lifecycle.ValidUntil); gateway certificates expire
+	// with it.
+	FLContractValidity time.Duration // FL_CONTRACT_VALIDITY (Go duration, default 2160h = 90 days)
 
 	// --- user directory (the platform's own Keycloak, where p3dx-aaa keeps
 	// users and each data provider's "public_key" attribute). Distinct from
@@ -278,6 +297,12 @@ func Load() *Config {
 		RequireSignedContract: getEnvBool("REQUIRE_SIGNED_CONTRACT", getEnvBool("TEE_REQUIRE_SIGNED_CONTRACT", true)),
 		GovSigningKeyPath:     getEnv("GOV_SIGNING_KEY_PATH", "keys/governance_signing_key.pem"),
 
+		GovCACertPath:        getEnv("GOV_CA_CERT_PATH", "./keys/governance_ca.pem"),
+		OrchestratorClientID: getEnv("ORCHESTRATOR_CLIENT_ID", "p3dx-fl-orchestrator"),
+		OrchestratorRole:     getEnv("ORCHESTRATOR_ROLE", "fl-orchestrator"),
+		FlotillaVMClientID:   getEnv("FLOTILLA_VM_CLIENT_ID", "flotilla-vm"),
+		FLContractValidity:   getEnvDuration("FL_CONTRACT_VALIDITY", DefaultFLContractValidity),
+
 		UserKeycloakBaseURL:       getEnv("USER_KEYCLOAK_BASE_URL", "http://localhost:8080"),
 		UserKeycloakRealm:         getEnv("USER_KEYCLOAK_REALM", "master"),
 		UserKeycloakAdminUser:     os.Getenv("USER_KEYCLOAK_ADMIN_USER"),
@@ -319,6 +344,25 @@ func getEnvBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// DefaultFLContractValidity is FL_CONTRACT_VALIDITY's default: 90 days.
+const DefaultFLContractValidity = 90 * 24 * time.Hour
+
+// getEnvDuration reads a Go duration string ("2160h", "30m"). An unparseable
+// or non-positive value falls back to the default, with a log line so the
+// typo doesn't go unnoticed.
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Printf("[CONFIG] %s=%q is not a positive duration; using default %s", key, v, fallback)
+		return fallback
+	}
+	return d
 }
 
 // getEnvCSV splits a comma-separated env var, trimming blanks.

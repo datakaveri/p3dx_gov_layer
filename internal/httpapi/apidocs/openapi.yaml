@@ -95,6 +95,8 @@ tags:
     description: A job's contract, and every job a user takes part in.
   - name: Final Models
     description: The global models produced by FL sessions.
+  - name: Flotilla Gateway
+    description: TLS certificates for FL session gateways, signed by the governance CA.
   - name: VM Registry
     description: IP addresses of the participant VMs created for an FL session.
 paths:
@@ -2171,6 +2173,103 @@ paths:
             curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/job/<jobId>/status' \
               --header 'Authorization: Bearer <tokenValue>'
 
+  /api/v1/gateway-certs:
+    post:
+      tags:
+        - Flotilla Gateway
+      summary: Issue Gateway Certificate
+      description: |
+        The FL orchestrator's service account requests a TLS server certificate for an FL session's
+        Flotilla gateway, signed by the governance CA. The contract (the session's latest, by
+        `submission_id`, or that exact contract, by `project_id`) must be a final FL roster contract,
+        fully signed and not expired; the certificate expires with the contract's `valid_until`.
+        Every issued certificate is recorded before it is returned.
+      operationId: post-gateway-cert
+      security:
+        - authorization: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - csr_pem
+                - server_ip
+              properties:
+                csr_pem:
+                  type: string
+                server_ip:
+                  type: string
+                submission_id:
+                  type: string
+                  description: Exactly one of `submission_id` / `project_id`
+                project_id:
+                  type: string
+                  description: Exactly one of `submission_id` / `project_id`
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  serial:
+                    type: string
+                  certificate_pem:
+                    type: string
+                  ca_certificate_pem:
+                    type: string
+                  fingerprint_sha256:
+                    type: string
+                  not_after:
+                    type: string
+                    format: date-time
+                  contract_id:
+                    type: string
+                  project_id:
+                    type: string
+                  job_id:
+                    type: string
+                  submission_id:
+                    type: string
+                  valid_until:
+                    type: string
+                    format: date-time
+                  parties:
+                    type: array
+                    items:
+                      type: object
+        '400':
+          description: MISSING_FIELDS, INVALID_CSR or INVALID_IP
+        '401':
+          description: Missing or invalid service token
+        '404':
+          description: CONTRACT_NOT_FOUND
+        '409':
+          description: CONTRACT_NOT_SIGNED
+        '410':
+          description: CONTRACT_EXPIRED
+  /api/v1/governance/ca-cert:
+    get:
+      tags:
+        - Flotilla Gateway
+      summary: Governance CA Certificate
+      description: The governance CA certificate (PEM). Public, so FL clients can pin it to trust gateway certificates.
+      operationId: get-governance-ca-cert
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/x-pem-file:
+              schema:
+                type: string
+        '503':
+          description: CA_NOT_LOADED
   /api/v1/job/{jobId}/tee:
     post:
       tags:

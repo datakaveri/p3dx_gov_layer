@@ -43,7 +43,16 @@ func main() {
 	}
 	log.Printf("[INFO] Governance signing key: %s", cfg.GovSigningKeyPath)
 
-	api := httpapi.New(cfg, database, kc, govKey)
+	// The same key is the CA for Flotilla gateway TLS certificates; its
+	// self-signed certificate is generated on first start (or when it no
+	// longer matches the key).
+	govCA, govCAPEM, err := services.LoadOrCreateGovernanceCACert(cfg.GovCACertPath, govKey)
+	if err != nil {
+		log.Fatalf("[ERROR] Failed to load governance CA certificate: %v", err)
+	}
+	log.Printf("[INFO] Governance CA certificate: %s (expires %s)", cfg.GovCACertPath, govCA.NotAfter.UTC().Format(time.RFC3339))
+
+	api := httpapi.New(cfg, database, kc, govKey, govCA, govCAPEM)
 
 	// REST (HTTP) server.
 	restServer := &http.Server{

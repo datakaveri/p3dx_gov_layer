@@ -74,6 +74,9 @@ func (s *Server) providerTokenIdentity(w http.ResponseWriter, r *http.Request) (
 		return providerIdentity{}, false
 	}
 	claims, _ := token.Claims.(jwt.MapClaims)
+	if s.rejectFlotillaVMToken(w, claims) {
+		return providerIdentity{}, false
+	}
 	var id providerIdentity
 	id.username, _ = claims["preferred_username"].(string)
 	if id.username == "" {

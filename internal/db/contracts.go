@@ -81,7 +81,8 @@ func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID strin
 // Prior data-provider signatures are still carried forward from the session's
 // most recent contract, since a restart reuses the same accepted roster
 // without redoing invite/accept.
-func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string) (*contract.Contract, error) {
+// validity sets Lifecycle.ValidUntil (now + validity); FL_CONTRACT_VALIDITY.
+func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string, validity time.Duration) (*contract.Contract, error) {
 	if pathway == "" {
 		pathway = "FL"
 	}
@@ -117,6 +118,9 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 	}
 
 	now := time.Now().UTC()
+	if validity <= 0 {
+		validity = 90 * 24 * time.Hour
+	}
 
 	c := &contract.Contract{
 		ProjectID:  projectID,
@@ -126,7 +130,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		Lifecycle: contract.Lifecycle{
 			CreatedAt:  now,
 			ValidFrom:  now,
-			ValidUntil: now.Add(90 * 24 * time.Hour),
+			ValidUntil: now.Add(validity),
 		},
 		Technique:     "FL",
 		ComputeChoice: "FEDERATED_LEARNING",

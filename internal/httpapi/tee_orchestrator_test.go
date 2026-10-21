@@ -44,7 +44,7 @@ func newTestServer(cfg *config.Config) *Server {
 	if err != nil {
 		panic(err)
 	}
-	return New(cfg, nil, nil, govKey)
+	return New(cfg, nil, nil, govKey, nil, nil)
 }
 
 func validContract() services.TEEContract {
