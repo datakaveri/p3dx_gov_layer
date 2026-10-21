@@ -19,6 +19,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -165,6 +166,16 @@ type userJob struct {
 	Events    []db.ContractEvent `json:"events"`
 	LastEvent *db.ContractEvent  `json:"last_event"`
 	Consumer  string             `json:"consumer"`
+	// The datasets on the job's contract — GET /jobs/consumer and
+	// GET /jobs/provider only.
+	Datasets []jobDataset `json:"datasets,omitempty"`
+}
+
+// jobDataset is one data provider's dataset on a job's contract.
+type jobDataset struct {
+	DatasetID   string `json:"dataset_id"`
+	DatasetName string `json:"dataset_name"`
+	ProviderID  string `json:"provider_id"`
 }
 
 // groupUserJobs folds a user's job_participants rows (newest job first) into
@@ -217,25 +228,45 @@ func (s *Server) userJobNames(ctx context.Context, userID string) ([]string, err
 	return names, nil
 }
 
+// ownTokenNames is the caller's token names (preferred_username, email and
+// their provider ids) when userID is the caller's own — sub, username or
+// email — and nil otherwise. A data provider's rows carry only their contract
+// provider id until they approve or sign, so without these a provider who
+// has not registered a public key (UsernameByUserID) can't find the jobs
+// they are requested on by their sub.
+func ownTokenNames(userID string, caller providerCaller) []string {
+	id := strings.ToLower(userID)
+	if id == "" || (id != strings.ToLower(caller.userID) && !caller.names[id]) {
+		return nil
+	}
+	out := make([]string, 0, len(caller.names))
+	for n := range caller.names {
+		out = append(out, n)
+	}
+	return out
+}
+
 // GET /jobs/user/{userId} — Authorization: Bearer <a dev Keycloak token>.
 // Every job (contract) the user takes part in — as its consumer or as a data /
 // infra provider — newest first, with their status on each. userId is their
 // Keycloak user id (sub); a username, email or provider id also works.
 func (s *Server) getUserJobs(w http.ResponseWriter, r *http.Request) {
-	s.listUserJobs(w, r, func(db.JobParticipant) bool { return true })
+	s.listUserJobs(w, r, func(db.JobParticipant) bool { return true }, false)
 }
 
 // GET /jobs/consumer/{userId} — Authorization: Bearer <a dev Keycloak token>.
-// The jobs (contracts) the user created, as their consumer, newest first.
+// The jobs (contracts) the user created, as their consumer, newest first,
+// each with the datasets on its contract.
 func (s *Server) getConsumerJobs(w http.ResponseWriter, r *http.Request) {
-	s.listUserJobs(w, r, isConsumerPart)
+	s.listUserJobs(w, r, isConsumerPart, true)
 }
 
 // GET /jobs/provider/{userId} — Authorization: Bearer <a dev Keycloak token>.
 // The jobs (contracts) the user is requested on as a data provider and has not
-// yet approved or rejected, newest first.
+// yet approved or rejected, newest first, each with the datasets on its
+// contract.
 func (s *Server) getProviderJobs(w http.ResponseWriter, r *http.Request) {
-	s.listUserJobs(w, r, isRequestedDataProviderPart)
+	s.listUserJobs(w, r, isRequestedDataProviderPart, true)
 }
 
 func isConsumerPart(p db.JobParticipant) bool {
@@ -258,9 +289,11 @@ func filterJobParticipants(rows []db.JobParticipant, keep func(db.JobParticipant
 }
 
 // listUserJobs writes the jobs of the userId path param's job_participants
-// rows that keep accepts, grouped by job (groupUserJobs).
-func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(db.JobParticipant) bool) {
-	if _, _, ok := s.devTokenClaims(w, r, "user"); !ok {
+// rows that keep accepts, grouped by job (groupUserJobs); with datasets, each
+// job also lists the datasets on its contract (attachJobDatasets).
+func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(db.JobParticipant) bool, datasets bool) {
+	tokenStr, claims, ok := s.devTokenClaims(w, r, "user")
+	if !ok {
 		return
 	}
 	userID := strings.TrimSpace(chi.URLParam(r, "userId"))
@@ -274,6 +307,7 @@ func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
 		return
 	}
+	names = append(names, ownTokenNames(userID, callerFromClaims(tokenStr, claims))...)
 	rows, err := s.db.ListJobParticipantsForUser(ctx, names)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, j{"status": "FAILED", "error": "INTERNAL_ERROR", "message": err.Error()})
@@ -281,6 +315,9 @@ func (s *Server) listUserJobs(w http.ResponseWriter, r *http.Request, keep func(
 	}
 	jobs := groupUserJobs(filterJobParticipants(rows, keep))
 	s.attachContractEvents(ctx, jobs)
+	if datasets {
+		s.attachJobDatasets(ctx, jobs)
+	}
 	writeJSON(w, http.StatusOK, j{"status": "SUCCESS", "user_id": userID, "count": len(jobs), "jobs": jobs})
 }
 
@@ -383,5 +420,34 @@ func (s *Server) attachContractEvents(ctx context.Context, jobs []userJob) {
 				break
 			}
 		}
+	}
+}
+
+// contractDatasets is the dataset of each data provider on c.
+func contractDatasets(c *contract.Contract) []jobDataset {
+	out := []jobDataset{}
+	for _, dp := range c.Parties.DataProviders {
+		out = append(out, jobDataset{DatasetID: catalogueItemID(dp), DatasetName: dp.DatasetName, ProviderID: partyProviderID(dp)})
+	}
+	return out
+}
+
+// attachJobDatasets fills each job's Datasets from its stored contract.
+// Best-effort: a job whose contract can't be loaded is returned without them.
+func (s *Server) attachJobDatasets(ctx context.Context, jobs []userJob) {
+	for i := range jobs {
+		raw, err := s.db.GetContractByJobID(ctx, jobs[i].JobID)
+		if err != nil || raw == nil {
+			if err != nil {
+				log.Printf("[JOB-PARTICIPANTS] Warning: job %s: contract not loaded for datasets: %v", jobs[i].JobID, err)
+			}
+			continue
+		}
+		c := &contract.Contract{}
+		if err := json.Unmarshal(raw, c); err != nil {
+			log.Printf("[JOB-PARTICIPANTS] Warning: job %s: contract not parsed for datasets: %v", jobs[i].JobID, err)
+			continue
+		}
+		jobs[i].Datasets = contractDatasets(c)
 	}
 }

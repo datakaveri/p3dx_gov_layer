@@ -103,8 +103,9 @@ func (s *Server) providerTokenIdentity(w http.ResponseWriter, r *http.Request) (
 
 // providerFromToken validates the bearer token and checks the caller holds
 // the {role} path segment — data-provider / infra-provider, or the dev
-// Keycloak's DATA_PROVIDER_ROLE ("provider"). On failure it has already
-// written the response.
+// Keycloak's DATA_PROVIDER_ROLE ("provider"); a dev token's "provider" role
+// also counts as data-provider (hasProviderKeyRole). On failure it has
+// already written the response.
 func (s *Server) providerFromToken(w http.ResponseWriter, r *http.Request) (username, userID, role string, ok bool) {
 	role = chi.URLParam(r, "role")
 	if !slices.Contains(providerKeyRoles, role) && role != s.dataProviderRole() {
@@ -115,11 +116,28 @@ func (s *Server) providerFromToken(w http.ResponseWriter, r *http.Request) (user
 	if !ok {
 		return "", "", "", false
 	}
-	if !slices.Contains(id.roles, role) {
+	if !hasProviderKeyRole(id.roles, role, s.dataProviderRole()) {
 		writeJSON(w, http.StatusForbidden, j{"status": "FAILED", "error": "INSUFFICIENT_ROLE"})
 		return "", "", "", false
 	}
 	return id.username, id.userID, role, true
+}
+
+// devProviderRole is the dev Keycloak's (iudx-v2) data-provider realm role.
+const devProviderRole = "provider"
+
+// hasProviderKeyRole reports whether roles (from the caller's token) satisfy
+// the {role} path segment. The dev Keycloak has no "data-provider" role — its
+// providers hold "provider" (or dataProviderRole, DATA_PROVIDER_ROLE) — so
+// either of those also satisfies data-provider.
+func hasProviderKeyRole(roles []string, role, dataProviderRole string) bool {
+	if slices.Contains(roles, role) {
+		return true
+	}
+	if role == "data-provider" {
+		return slices.Contains(roles, devProviderRole) || slices.Contains(roles, dataProviderRole)
+	}
+	return false
 }
 
 // PUT /provider-keys/{role} — register (or replace) the caller's public key.
