@@ -53,6 +53,9 @@ type Server struct {
 	// gatewayStore loads FL contracts and records issued gateway
 	// certificates — *db.DB in production; stubbed in tests.
 	gatewayStore gatewayCertStore
+	// flContracts loads a session's contract to gate FL output reads to its
+	// output owner (fl_output.go) — *db.DB in production; stubbed in tests.
+	flContracts flContractStore
 }
 
 // New builds the Server.
@@ -70,6 +73,7 @@ func New(cfg *config.Config, database *db.DB, kc *keycloak.Client, govKey *servi
 		govCA:        govCA,
 		govCAPEM:     govCAPEM,
 		gatewayStore: database,
+		flContracts:  database,
 	}
 	// Pick up TEE runs whose outcome wasn't recorded before a restart.
 	go s.resumeTEERunWatchers()
@@ -178,6 +182,11 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/final-models", s.getFinalModels)
 	r.Get("/final-model/download", s.getFinalModelDownload)
 	r.Get("/final-model/summary", s.getFinalModelSummary)
+	// FL session output (fl_output.go): the orchestrator uploads the final
+	// model + metrics; the session's output owner reads / downloads them.
+	r.Post("/fl-output/{submissionId}", s.postFLOutput)
+	r.Get("/fl-output/{submissionId}", s.getFLOutput)
+	r.Get("/fl-output/{submissionId}/download", s.getFLOutputDownload)
 
 	// Participant-VM IP registry (vm_registry.go), called by
 	// terraform/participant-vm right after it creates each VM. Guarded by an

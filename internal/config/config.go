@@ -63,6 +63,7 @@ type Config struct {
 	FLSessionConfig               string        // FL_SESSION_CONFIG
 	FLServerEndpoint              string        // FL_SERVER_ENDPOINT (default localhost:12345)
 	CheckpointDir                 string        // CHECKPOINT_DIR (default FEDML_SRC/checkpoint) — where flo_server writes per-round global models
+	FLOutputMaxBytes              int64         // FL_OUTPUT_MAX_BYTES (default 2 GiB) — cap on one POST /fl-output upload (model + metrics)
 	FLLogDir                      string        // FL_LOG_DIR
 	ProviderStartClientPath       string        // PROVIDER_START_CLIENT_PATH (default /start-client)
 	FLClientDelay                 time.Duration // FL_CLIENT_DELAY_MS (default 5000)
@@ -262,6 +263,7 @@ func Load() *Config {
 		FLSessionConfig:               getEnv("FL_SESSION_CONFIG", "../config/flotilla_quicksetup_config.yaml"),
 		FLServerEndpoint:              getEnv("FL_SERVER_ENDPOINT", "localhost:12345"),
 		CheckpointDir:                 getEnv("CHECKPOINT_DIR", filepath.Join(repoRoot, "fedml-ng-release-v1.0/src/checkpoint")),
+		FLOutputMaxBytes:              getEnvInt64("FL_OUTPUT_MAX_BYTES", 2<<30),
 		FLLogDir:                      getEnv("FL_LOG_DIR", filepath.Join(repoRoot, "logs")),
 		ProviderStartClientPath:       getEnv("PROVIDER_START_CLIENT_PATH", "/start-client"),
 		FLClientDelay:                 getEnvMS("FL_CLIENT_DELAY_MS", 5000),
@@ -439,6 +441,16 @@ func trimProvisionSuffix(u string) string {
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getEnvInt64 reads a positive integer, falling back when unset or invalid.
+func getEnvInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && n > 0 {
+			return n
+		}
 	}
 	return fallback
 }

@@ -95,6 +95,10 @@ func (s *Server) listFinalModels() ([]finalModel, error) {
 	return out, nil
 }
 //thsi will return the above as json file 
+//
+// Deprecated: unauthenticated and lists every session; use GET
+// /fl-output/{submissionId} (owner-gated). Behaviour kept for existing callers.
+//
 // GET /final-models — list each session's final (highest-round) model, newest
 // first, plus `latest` (the most recently written one) for convenience.
 func (s *Server) getFinalModels(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +189,9 @@ func (s *Server) resolveModelFile(w http.ResponseWriter, r *http.Request) (strin
 
 // GET /final-model/download?session_id=&round= — stream a global model .pt.
 // Defaults to the newest session's final round.
+//
+// Deprecated: unauthenticated; use GET /fl-output/{submissionId}/download
+// (owner-gated). Behaviour kept for existing callers.
 func (s *Server) getFinalModelDownload(w http.ResponseWriter, r *http.Request) {
 	abs, filename, ok := s.resolveModelFile(w, r)
 	if !ok {
@@ -208,10 +215,26 @@ func (s *Server) getFinalModelDownload(w http.ResponseWriter, r *http.Request) {
 // GET /final-model/summary?session_id=&round= — a human-readable JSON view of a
 // model checkpoint (layers, shapes, dtypes, total params, sample weights). Parses
 // the .pt torch-free via the embedded python script, so a .pt (opaque binary) is
-// legible in the UI without downloading it.
+// legible in the UI without downloading it. Only the session's output owner
+// may read it: the contract is looked up by the model's session id.
 func (s *Server) getFinalModelSummary(w http.ResponseWriter, r *http.Request) {
+	if q := r.URL.Query().Get("session_id"); q != "" && !safeID.MatchString(q) {
+		writeJSON(w, http.StatusBadRequest, j{"status": "FAILED", "error": "INVALID_SESSION_ID"})
+		return
+	}
+	_, claims, ok := s.devTokenClaims(w, r, "output owner")
+	if !ok {
+		return
+	}
 	abs, filename, ok := s.resolveModelFile(w, r)
 	if !ok {
+		return
+	}
+	sid := r.URL.Query().Get("session_id")
+	if m := modelFileRe.FindStringSubmatch(filename); m != nil {
+		sid = m[1]
+	}
+	if !s.checkSessionOwner(w, r, claims, sid) {
 		return
 	}
 
