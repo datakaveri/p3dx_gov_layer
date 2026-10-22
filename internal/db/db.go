@@ -308,6 +308,16 @@ func (d *DB) migrate(ctx context.Context) error {
 			issued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS gateway_certs_submission_id_idx ON gateway_certs(submission_id)`,
+		// FL participation negotiation: a provider who declines their second
+		// (or later) participation request for a session is removed from that
+		// session for good. See internal/db/fl_notifications.go.
+		`CREATE TABLE IF NOT EXISTS fl_session_removed_providers (
+			submission_id TEXT NOT NULL,
+			username TEXT NOT NULL,
+			reason TEXT,
+			removed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (submission_id, username)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := d.Pool.Exec(ctx, s); err != nil {
@@ -322,6 +332,7 @@ func (d *DB) migrate(ctx context.Context) error {
 	log.Println("[DATABASE] Table provider_public_keys ready")
 	log.Println("[DATABASE] Table job_participants ready")
 	log.Println("[DATABASE] Table gateway_certs ready")
+	log.Println("[DATABASE] Table fl_session_removed_providers ready")
 	log.Println("[DATABASE] Database initialization complete")
 	return nil
 }

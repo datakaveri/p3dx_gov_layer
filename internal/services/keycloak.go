@@ -29,7 +29,9 @@ type JWK struct {
 // FetchKeycloakJWKS fetches the JWKS from KEYCLOAK_JWKS_URL (or, if unset,
 // derives the standard path from KEYCLOAK_BASE_URL + KEYCLOAK_REALM) and
 // returns RSA public keys. Keys are indexed by kid; if kid is empty, the
-// first key is used.
+// first key is used. KEYCLOAK_JWKS_URL may be a comma-separated list (e.g.
+// the local and the dev Keycloak); their keys are merged, so tokens from
+// any of them validate.
 func FetchKeycloakJWKS() (map[string]*rsa.PublicKey, error) {
 	jwksURL := os.Getenv("KEYCLOAK_JWKS_URL")
 	if jwksURL == "" {
@@ -40,7 +42,29 @@ func FetchKeycloakJWKS() (map[string]*rsa.PublicKey, error) {
 		}
 		jwksURL = base + "/realms/" + realm + "/protocol/openid-connect/certs"
 	}
-	return FetchJWKS(jwksURL)
+	merged := make(map[string]*rsa.PublicKey)
+	var lastErr error
+	for _, u := range strings.Split(jwksURL, ",") {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		keys, err := FetchJWKS(u)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for kid, pub := range keys {
+			merged[kid] = pub
+		}
+	}
+	if len(merged) == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no JWKS URL in KEYCLOAK_JWKS_URL")
+		}
+		return nil, lastErr
+	}
+	return merged, nil
 }
 
 // FetchJWKS fetches the JWKS at jwksURL and returns its RSA public keys,

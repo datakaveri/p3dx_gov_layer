@@ -157,8 +157,19 @@ func (s *Server) devTokenClaims(w http.ResponseWriter, r *http.Request, whose st
 			"message": "send the " + whose + "'s dev Keycloak token as the Bearer token"})
 		return "", nil, false
 	}
-	token, err := services.ValidateAccessTokenAt(tokenStr, s.cfg.DataProviderJWKSURL)
-	if err != nil || !token.Valid {
+	// Dev Keycloak first (Postman), then the Keycloak p3dx-aaa's UI users log
+	// in through (PROVIDER_KEY_JWKS_URL), so both kinds of token work.
+	var token *jwt.Token
+	var err error
+	for _, jwksURL := range []string{s.cfg.DataProviderJWKSURL, s.cfg.ProviderKeyJWKSURL} {
+		if jwksURL == "" {
+			continue
+		}
+		if token, err = services.ValidateAccessTokenAt(tokenStr, jwksURL); err == nil && token.Valid {
+			break
+		}
+	}
+	if err != nil || token == nil || !token.Valid {
 		log.Printf("[JOB-APPROVAL] %s token rejected: %v", whose, err)
 		writeJSON(w, http.StatusUnauthorized, j{"status": "FAILED", "error": "INVALID_OR_EXPIRED_TOKEN"})
 		return "", nil, false
@@ -229,7 +240,8 @@ func auditKey(providerID, item string) string { return providerID + "\x00" + ite
 // each data provider has made the call with their own token.
 func (s *Server) dataProviderApprovals(ctx context.Context, jobID string, c *contract.Contract, caller providerCaller, checked map[string]bool) []db.AuditEntry {
 	now := time.Now().UTC()
-	hasRole := slices.Contains(caller.roles, s.dataProviderRole())
+	// Local Keycloak users hold "data-provider"; dev ones hold "provider".
+	hasRole := hasProviderKeyRole(caller.roles, "data-provider", s.dataProviderRole())
 
 	entries := []db.AuditEntry{}
 	for _, dp := range c.Parties.DataProviders {

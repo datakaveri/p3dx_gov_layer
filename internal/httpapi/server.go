@@ -109,6 +109,8 @@ func (s *Server) registerRoutes(r chi.Router) {
 	r.Get("/notifications/{key}", s.getNotifications)
 	r.Patch("/notifications/{key}/read", s.patchNotificationRead)
 	r.Post("/notifications/{key}/respond", s.respondToNotification)
+	// FL participation negotiation: providers removed for a 2nd decline (fl_negotiation.go)
+	r.Get("/sessions/{submissionId}/removed-providers", s.getRemovedProviders)
 
 	// Single contract endpoint for both pathways:
 	// Routes to FL, TEE, or SMPC orchestration based on technique field

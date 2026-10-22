@@ -197,3 +197,123 @@ func (d *DB) SupersedeContractSignRequests(ctx context.Context, contractID strin
 	}
 	return tag.RowsAffected(), nil
 }
+
+// ---------------------------------------------------------------------------
+// Participation negotiation. A provider gets one free decline per FL
+// session: declining a second time removes them from the session — they're
+// never invited to it again. A provider who's only ever said willing is
+// never warned or removed.
+
+// CountParticipationRequests returns how many participation_request
+// notifications username has already received for submissionID.
+func (d *DB) CountParticipationRequests(ctx context.Context, username, submissionID string) (int, error) {
+	var n int
+	err := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM notifications
+		WHERE recipient_username = $1
+		  AND payload->>'kind' = 'participation_request'
+		  AND payload->>'submission_id' = $2`, username, submissionID).Scan(&n)
+	return n, err
+}
+
+// CountParticipationDeclines returns how many participation asks (requests
+// or updated lists) username has declined for submissionID.
+func (d *DB) CountParticipationDeclines(ctx context.Context, username, submissionID string) (int, error) {
+	var n int
+	err := d.Pool.QueryRow(ctx, `SELECT COUNT(*) FROM notifications
+		WHERE recipient_username = $1
+		  AND payload->>'kind' IN ('participation_request', 'participation_update')
+		  AND payload->>'submission_id' = $2
+		  AND response = 'declined'`, username, submissionID).Scan(&n)
+	return n, err
+}
+
+// RemovedProvider is one row of fl_session_removed_providers.
+type RemovedProvider struct {
+	SubmissionID string     `db:"submission_id" json:"submission_id"`
+	Username     string     `db:"username" json:"username"`
+	Reason       *string    `db:"reason" json:"reason"`
+	RemovedAt    *time.Time `db:"removed_at" json:"removed_at"`
+}
+
+// RemoveProviderFromSession records username as removed from submissionID.
+// Returns false if they were already removed.
+func (d *DB) RemoveProviderFromSession(ctx context.Context, submissionID, username, reason string) (bool, error) {
+	tag, err := d.Pool.Exec(ctx, `INSERT INTO fl_session_removed_providers
+		(submission_id, username, reason) VALUES ($1, $2, $3)
+		ON CONFLICT (submission_id, username) DO NOTHING`, submissionID, username, reason)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// GetRemovedProviders lists the providers removed from submissionID.
+func (d *DB) GetRemovedProviders(ctx context.Context, submissionID string) ([]RemovedProvider, error) {
+	rows, err := d.Pool.Query(ctx, `SELECT submission_id, username, reason, removed_at
+		FROM fl_session_removed_providers WHERE submission_id = $1 ORDER BY removed_at`, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	removed, err := pgx.CollectRows(rows, pgx.RowToStructByName[RemovedProvider])
+	if err != nil {
+		return nil, err
+	}
+	for i := range removed {
+		removed[i].RemovedAt = asIST(removed[i].RemovedAt)
+	}
+	return removed, nil
+}
+
+// GetLatestParticipationRequests returns, for submissionID, each recipient's
+// most recent participation_request (one row per recipient).
+func (d *DB) GetLatestParticipationRequests(ctx context.Context, submissionID string) ([]Notification, error) {
+	rows, err := d.Pool.Query(ctx, `SELECT DISTINCT ON (recipient_username) `+notificationColumns+`
+		FROM notifications
+		WHERE payload->>'kind' = 'participation_request' AND payload->>'submission_id' = $1
+		ORDER BY recipient_username, created_at DESC`, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	notifications, err := pgx.CollectRows(rows, pgx.RowToStructByName[Notification])
+	if err != nil {
+		return nil, err
+	}
+	for i := range notifications {
+		notifications[i].fixTimezones()
+	}
+	return notifications, nil
+}
+
+// GetNotificationForRecipient returns one notification addressed to username,
+// or (nil, nil) when not found.
+func (d *DB) GetNotificationForRecipient(ctx context.Context, notificationID, username string) (*Notification, error) {
+	rows, err := d.Pool.Query(ctx, `SELECT `+notificationColumns+`
+		FROM notifications WHERE id = $1 AND recipient_username = $2`, notificationID, username)
+	if err != nil {
+		return nil, err
+	}
+	n, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[Notification])
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	n.fixTimezones()
+	return &n, nil
+}
+
+// HasNewerParticipationAsk reports whether n's recipient has a
+// participation_request or participation_update for submissionID created
+// after n — i.e. n has been replaced and should no longer be answered.
+func (d *DB) HasNewerParticipationAsk(ctx context.Context, n *Notification, submissionID string) (bool, error) {
+	var newer bool
+	err := d.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM notifications
+		WHERE recipient_username = $1
+		  AND payload->>'kind' IN ('participation_request', 'participation_update')
+		  AND payload->>'submission_id' = $2
+		  AND id <> $3
+		  AND created_at > (SELECT created_at FROM notifications WHERE id = $3))`,
+		n.RecipientUsername, submissionID, n.ID).Scan(&newer)
+	return newer, err
+}
