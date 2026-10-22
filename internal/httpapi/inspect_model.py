@@ -1,5 +1,5 @@
-// so this will read the models and the vales inside the model , thsi also have the output in json format
 #!/usr/bin/env python3
+# Reads the model and the values inside it; the output is JSON.
 """Read a PyTorch .pt (torch.save) checkpoint WITHOUT torch and emit a readable
 JSON summary: layers, shapes, dtypes, total params, and a few sample weights.
 A torch.save file is a zip of a pickle (data.pkl) plus raw tensor storages."""

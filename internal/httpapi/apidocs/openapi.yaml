@@ -2809,7 +2809,8 @@ paths:
       description: |
         A readable JSON view of a model checkpoint (layers, shapes, dtypes, total parameters, sample weights),
         so a model can be inspected without downloading it. Same `session_id` / `round` defaults as
-        [Download Final Model](#operation/get-final-model-download).
+        [Download Final Model](#operation/get-final-model-download). Output owner only: the contract is looked
+        up by the model's session id and its user party must match the token's `sub`.
       operationId: get-final-model-summary
       parameters:
         - $ref: '#/components/parameters/ModelSessionParam'
@@ -2848,12 +2849,204 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Failed'
-      security: []
+        '401':
+          description: Missing or invalid token
+        '403':
+          description: '`NOT_OUTPUT_OWNER` — only the session''s output owner may read it'
+      security:
+        - authorization: []
       x-codeSamples:
         - lang: cURL
           label: Get final model summary
           source: |
-            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/final-model/summary?session_id=<sessionId>&round=10'
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/final-model/summary?session_id=<sessionId>&round=10' \
+              --header 'Authorization: Bearer <token>'
+
+  /api/v1/fl-output/{submissionId}:
+    post:
+      tags:
+        - Final Models
+      summary: Store FL Session Output
+      description: |
+        Called by the FL orchestrator's service account (client `ORCHESTRATOR_CLIENT_ID` with realm role
+        `ORCHESTRATOR_ROLE`) once a session finishes. Streams the final global model to
+        `model_<sid>_round_<round>.pt` and stores the metrics (plus `fetched_at`) as `output_<sid>.json` in
+        `CHECKPOINT_DIR`. `<sid>` is `submissionId` with every character outside `[a-zA-Z0-9_-]` replaced by `_`.
+        The whole upload is capped at `FL_OUTPUT_MAX_BYTES` (default 2 GiB).
+      operationId: post-fl-output
+      parameters:
+        - $ref: '#/components/parameters/FLSubmissionParam'
+      security:
+        - authorization: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - metrics
+                - round
+                - model
+              properties:
+                metrics:
+                  type: string
+                  description: |
+                    JSON object: `global_validation_metrics` ({metric: [round1, round2, ...]}), `session_config`,
+                    `start_timestamp`, `end_timestamp`, `last_checkpoint_round`, `rounds_total`
+                round:
+                  type: integer
+                  minimum: 1
+                model:
+                  type: string
+                  format: binary
+                  description: The final model; send it as the last part
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: stored
+                  session_id:
+                    type: string
+                  file:
+                    type: string
+                  size_bytes:
+                    type: integer
+              examples:
+                Example:
+                  value:
+                    status: stored
+                    session_id: sub-2026-10-14-001
+                    file: model_sub-2026-10-14-001_round_10.pt
+                    size_bytes: 4815162
+        '400':
+          description: |-
+            Bad Request
+            - `INVALID_SESSION_ID`, `INVALID_MULTIPART`, `INVALID_METRICS`, `INVALID_ROUND`, `MISSING_FIELDS`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Failed'
+        '401':
+          description: Missing or invalid service token
+        '403':
+          description: Token not issued to the orchestrator client, or lacks its role
+        '413':
+          description: Upload exceeds `FL_OUTPUT_MAX_BYTES` (`TOO_LARGE`)
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: cURL
+          label: Store FL output
+          source: |
+            curl --location --request POST 'https://v2.dev.iudx.io/gov-layer/api/v1/fl-output/<submissionId>' \
+              --header 'Authorization: Bearer <orchestratorToken>' \
+              --form 'metrics=<metrics.json' --form 'round=10' --form 'model=@model.pt'
+    get:
+      tags:
+        - Final Models
+      summary: Get FL Session Output
+      description: |
+        The session's output for its output owner (the contract's user party; the dev Keycloak token's `sub`
+        must match). Always 200 once authorised: `status` is `ready` only when both the metrics and the model
+        are stored, else `not_found`. Metric keys are normalised case-insensitively (first containing `acc` is
+        accuracy, first containing `loss` is loss); accuracy is left as stored (usually a fraction).
+      operationId: get-fl-output
+      parameters:
+        - $ref: '#/components/parameters/FLSubmissionParam'
+      security:
+        - authorization: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              examples:
+                Example:
+                  value:
+                    status: ready
+                    session_id: sub-2026-10-14-001
+                    rounds:
+                      done: 2
+                      total: 2
+                    final:
+                      accuracy: 0.91
+                      loss: 0.27
+                    per_round:
+                      - round: 1
+                        accuracy: 0.84
+                        loss: 0.45
+                      - round: 2
+                        accuracy: 0.91
+                        loss: 0.27
+                    artifact:
+                      file: model_sub-2026-10-14-001_round_2.pt
+                      size_bytes: 4815162
+                      modified_at: '2026-10-14T12:00:00Z'
+                    fetched_at: '2026-10-14T12:00:01Z'
+        '400':
+          description: '`INVALID_SESSION_ID`'
+        '401':
+          description: Missing or invalid token
+        '403':
+          description: '`NOT_OUTPUT_OWNER`'
+        '404':
+          $ref: '#/components/responses/ContractNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: cURL
+          label: Get FL output
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/fl-output/<submissionId>' \
+              --header 'Authorization: Bearer <token>'
+
+  /api/v1/fl-output/{submissionId}/download:
+    get:
+      tags:
+        - Final Models
+      summary: Download FL Session Model
+      description: Downloads the session's highest-round model; output owner only.
+      operationId: get-fl-output-download
+      parameters:
+        - $ref: '#/components/parameters/FLSubmissionParam'
+      security:
+        - authorization: []
+      responses:
+        '200':
+          description: OK
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              description: attachment; filename="model_<sid>_round_<round>.pt"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: '`INVALID_SESSION_ID`'
+        '401':
+          description: Missing or invalid token
+        '403':
+          description: '`NOT_OUTPUT_OWNER`'
+        '404':
+          description: '`CONTRACT_NOT_FOUND` or `NO_MODEL`'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      x-codeSamples:
+        - lang: cURL
+          label: Download FL model
+          source: |
+            curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/fl-output/<submissionId>/download' \
+              --header 'Authorization: Bearer <token>' --output model.pt
 
   /api/v1/vm-registry:
     post:
@@ -3054,6 +3247,13 @@ components:
       name: X-VM-Registry-Token
       description: Shared secret; only checked when the deployment sets `VM_REGISTRY_TOKEN`
   parameters:
+    FLSubmissionParam:
+      name: submissionId
+      in: path
+      required: true
+      description: The raw FL submission id (the contract's session_id)
+      schema:
+        type: string
     RoleParam:
       name: role
       in: path
