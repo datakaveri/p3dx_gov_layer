@@ -66,7 +66,7 @@ pipeline {
     SEMGREP_IMAGE   = 'semgrep/semgrep:1.140.0'
     GITLEAKS_IMAGE  = 'zricethezav/gitleaks:v8.28.0'
     OSV_IMAGE       = 'ghcr.io/google/osv-scanner:v2.2.3'
-    HADOLINT_IMAGE  = 'hadolint/hadolint:v2.12.0'
+    HADOLINT_IMAGE  = 'hadolint/hadolint:v2.12.0-debian'   // -debian: .inside needs a shell (plain image is scratch)
     DOCKLE_IMAGE    = 'goodwithtech/dockle:v0.4.15'
     SYFT_IMAGE      = 'anchore/syft:v1.33.0'
     COSIGN_IMAGE    = 'gcr.io/projectsigstore/cosign:v2.6.1'
@@ -227,13 +227,21 @@ pipeline {
           steps {
             // Report first so it is archived even when the gate fails (as in dx-authz-go)
             sh 'trivy fs --scanners vuln,secret,misconfig --skip-dirs .cache,.home,ctx,reports --output reports/trivy-fs-report.txt .'
-            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Vulnerable dependencies — see reports/trivy-fs-report.txt, govulncheck, osv-scanner') {
+            // One catchError per scanner so a finding in one does not skip the others.
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Trivy: HIGH/CRITICAL vulnerable dependencies - see reports/trivy-fs-report.txt') {
               sh 'trivy fs --scanners vuln,secret --skip-dirs .cache,.home,ctx,reports --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .'
+            }
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'govulncheck: reachable vulnerabilities - see reports/govulncheck.txt') {
               script {
                 inGo '''
                   go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-                  "$(go env GOPATH)/bin/govulncheck" ./... | tee reports/govulncheck.txt
+                  rc=0; "$(go env GOPATH)/bin/govulncheck" ./... > reports/govulncheck.txt 2>&1 || rc=$?
+                  cat reports/govulncheck.txt; exit $rc
                 '''
+              }
+            }
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'osv-scanner: vulnerable dependencies - see reports/osv-scanner.txt') {
+              script {
                 docker.image(env.OSV_IMAGE).inside('--entrypoint=') {
                   sh 'osv-scanner scan source --recursive --format table . > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
                 }
