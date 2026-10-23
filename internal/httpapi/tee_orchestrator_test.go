@@ -108,8 +108,10 @@ func TestValidateTEEContract(t *testing.T) {
 		{
 			// The guest fetches this URL with its managed identity, so a
 			// plaintext scheme would put a bearer token on the wire.
-			name:    "non-https dataset URL",
-			mutate:  func(c *services.TEEContract) { c.DatasetDetails.ResourceURL = "http://acct.blob.core.windows.net/c/d.enc" },
+			name: "non-https dataset URL",
+			mutate: func(c *services.TEEContract) {
+				c.DatasetDetails.ResourceURL = "http://acct.blob.core.windows.net/c/d.enc"
+			},
 			wantErr: "must be an absolute https URL",
 		},
 		{

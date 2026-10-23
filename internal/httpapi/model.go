@@ -94,7 +94,8 @@ func (s *Server) listFinalModels() ([]finalModel, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].modTime > out[j].modTime })
 	return out, nil
 }
-//thsi will return the above as json file 
+
+// thsi will return the above as json file
 //
 // Deprecated: unauthenticated and lists every session; use GET
 // /fl-output/{submissionId} (owner-gated). Behaviour kept for existing callers.

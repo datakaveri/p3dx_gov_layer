@@ -26,7 +26,7 @@ var KnownWorkloads = map[string]KnownWorkload{
 	// "mnist": {
 	// 	Name:      "MNIST",
 	"credits-evaluation": {
-		Name:      "Credits Evaluation",
+		Name: "Credits Evaluation",
 		// Image:     "docker.io/rohithvaidya/mnist-vault-workload:1.8",
 		Image:     "docker.io/rohithvaidya/mnist-vault-workload@sha256:e155df758090022a9ca9d1ff6574bf7e5c3d1975c7e14f5d62f4a11054bbddd8",
 		Resources: contract.WorkloadResources{CPU: "250m", Memory: "512Mi"},

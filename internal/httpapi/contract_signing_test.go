@@ -18,8 +18,8 @@ import (
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
 type stubKeys map[string]string
