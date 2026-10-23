@@ -278,7 +278,7 @@ run), and optionally Keycloak.
 
 ```bash
 
-# to run keycloak 
+# to run keycloak
 bin/kc.sh start-dev
 
 # from this directory (p3dx_gov_layer/)
