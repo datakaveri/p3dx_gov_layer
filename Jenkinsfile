@@ -116,7 +116,9 @@ pipeline {
             }
           }
           if (fileExists('.pre-commit-config.yaml')) {
-            docker.image(env.PRECOMMIT_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e PRE_COMMIT_HOME=${env.WORKSPACE}/.cache/pre-commit") {
+            // SKIP: hooks that need docker or Go inside this python container; CI runs them as their own stages
+            // (hadolint: Dockerfile / IaC, gofmt: Static checks, go-mod-guard: Static checks).
+            docker.image(env.PRECOMMIT_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e PRE_COMMIT_HOME=${env.WORKSPACE}/.cache/pre-commit -e SKIP=hadolint-docker,gofmt,go-mod-guard") {
               sh '''
                 pip install --quiet --user pre-commit==4.3.0
                 git config --global --add safe.directory "$PWD"
