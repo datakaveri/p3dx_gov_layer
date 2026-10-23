@@ -1,0 +1,20 @@
+# golangci-lint v1 config (Jenkinsfile GOLANGCI_IMAGE golangci/golangci-lint:v1.64.8, Go 1.22) - copy to the repo root.
+# Start from the default linters plus a few high-value ones; add more as the code is cleaned up.
+run:
+  timeout: 5m
+  tests: true
+linters:
+  enable:
+    - errcheck        # unchecked errors
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - gosimple
+    - bodyclose       # unclosed HTTP response bodies
+    - errorlint       # wrong error comparisons/wrapping
+    - misspell
+    - gofmt
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
