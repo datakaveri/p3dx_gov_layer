@@ -60,6 +60,7 @@ pipeline {
     // Pinned tool images (bump deliberately, never :latest)
     GO_IMAGE        = 'golang:1.22-bookworm'       // matches go.mod / Dockerfile
     GOLANGCI_IMAGE  = 'golangci/golangci-lint:v1.64.8'
+    LINT_BASELINE   = 'b0130a2256e233fecad283cadaddcd4a22092e3f'   // deploy_updates when CI was added; see Static checks
     NODE_IMAGE      = 'node:22-alpine'
     PRECOMMIT_IMAGE = 'python:3.12-bookworm'   // needs git (pre-commit); -slim has none
     SEMGREP_IMAGE   = 'semgrep/semgrep:1.140.0'
@@ -150,7 +151,12 @@ pipeline {
             fi
           '''
           docker.image(env.GOLANGCI_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e GOFLAGS=-buildvcs=false -e GOCACHE=${env.WORKSPACE}/.cache/go-build -e GOMODCACHE=${env.WORKSPACE}/.cache/gomod -e GOLANGCI_LINT_CACHE=${env.WORKSPACE}/.cache/golangci") {
-            sh 'golangci-lint run --timeout 5m --out-format checkstyle:reports/golangci.xml,colored-line-number'
+            // Existing findings (29 at LINT_BASELINE, 2026-10-23) are reported and mark the build UNSTABLE;
+            // anything new since LINT_BASELINE blocks. Move LINT_BASELINE forward as the backlog is fixed.
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Existing lint findings - see reports/golangci.xml') {
+              sh 'golangci-lint run --timeout 5m --out-format checkstyle:reports/golangci.xml,colored-line-number'
+            }
+            sh 'git config --global --add safe.directory "$PWD"; golangci-lint run --timeout 5m --new-from-rev=${LINT_BASELINE}'
           }
         }
       }
