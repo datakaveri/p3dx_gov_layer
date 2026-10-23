@@ -34,8 +34,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
 )
 
 // ContractSignNotificationType tags the notification payload so callers

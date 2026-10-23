@@ -28,7 +28,7 @@ type TEEContract struct {
 	// TEE_REQUIRE_SIGNED_CONTRACT on, provisioning is refused unless every
 	// data provider on that contract has a valid signature over its hash.
 	GovernanceContractID string `json:"governanceContractId,omitempty"`
-	RequestID  string `json:"requestId"`
+	RequestID            string `json:"requestId"`
 
 	ConsumerID string `json:"consumerId"`
 	ProviderID string `json:"providerId"`

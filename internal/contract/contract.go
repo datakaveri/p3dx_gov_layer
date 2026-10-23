@@ -217,11 +217,11 @@ type Contract struct {
 	ContractID string `json:"contract_id"`
 	// JobID is unique per contract. omitempty keeps the hash of contracts
 	// created before job_id existed unchanged.
-	JobID         string      `json:"job_id,omitempty"`
-	Version       int         `json:"version"`
-	Lifecycle     Lifecycle   `json:"lifecycle"`
-	Technique     string      `json:"technique"`
-	ComputeChoice string      `json:"compute_choice"`
+	JobID         string    `json:"job_id,omitempty"`
+	Version       int       `json:"version"`
+	Lifecycle     Lifecycle `json:"lifecycle"`
+	Technique     string    `json:"technique"`
+	ComputeChoice string    `json:"compute_choice"`
 	// Purpose is the consumer's stated purpose for processing, shown to data
 	// providers in the DPDP Rule 3 consent notice. It is covered by the
 	// contract hash, so a provider's signature binds them to this purpose
@@ -232,11 +232,11 @@ type Contract struct {
 	Workload *Workload `json:"workload,omitempty"`
 	// Trustee and CallbackURL complete the coordinator's CreateJob shape
 	// (contractId/workload/trustee/callbackUrl). Set only alongside Workload.
-	Trustee     *JobTrustee `json:"trustee,omitempty"`
-	CallbackURL string      `json:"callbackUrl,omitempty"`
-	Parties       Parties     `json:"parties"`
-	SessionInfo   SessionInfo `json:"session_info"`
-	ContractHash  string      `json:"contract_hash,omitempty"`
+	Trustee      *JobTrustee `json:"trustee,omitempty"`
+	CallbackURL  string      `json:"callbackUrl,omitempty"`
+	Parties      Parties     `json:"parties"`
+	SessionInfo  SessionInfo `json:"session_info"`
+	ContractHash string      `json:"contract_hash,omitempty"`
 	// GovernanceSignature is gov_layer's own signature over ContractHash
 	// (services.GovernanceKey), sent to data providers so they can verify the
 	// hash came from gov_layer before signing it. Blanked by ComputeHash like
