@@ -61,7 +61,7 @@ pipeline {
     GO_IMAGE        = 'golang:1.22-bookworm'       // matches go.mod / Dockerfile
     GOLANGCI_IMAGE  = 'golangci/golangci-lint:v1.64.8'
     NODE_IMAGE      = 'node:22-alpine'
-    PRECOMMIT_IMAGE = 'python:3.12-slim'
+    PRECOMMIT_IMAGE = 'python:3.12-bookworm'   // needs git (pre-commit); -slim has none
     SEMGREP_IMAGE   = 'semgrep/semgrep:1.140.0'
     GITLEAKS_IMAGE  = 'zricethezav/gitleaks:v8.28.0'
     OSV_IMAGE       = 'ghcr.io/google/osv-scanner:v2.2.3'
