@@ -7,8 +7,8 @@
 // Jenkins never touches the cluster.
 //
 // Job type: plain Pipeline ("Pipeline script from SCM"), NOT Multibranch. Such a job has no BRANCH_NAME,
-// only GIT_BRANCH (e.g. "origin/main"), so the branch is derived from that. Branch Specifier: */main.
-// Other branches (e.g. version-0.1.0) run every check but do not push or bump.
+// only GIT_BRANCH (e.g. "origin/deploy_updates"), so the branch is derived from that. Branch Specifier: */deploy_updates.
+// Other branches (e.g. main, version-0.1.0) run every check but do not push or bump.
 //
 // The 12 checks (see dx-azure-deployment/docs/cicd-pipeline-guide.html):
 //   1 unit tests (-race, coverage gate)   2 gofmt / go vet / golangci-lint   3 go.mod guard (+ tidy)
@@ -50,7 +50,7 @@ pipeline {
     IMAGE_REPO      = 'ghcr.io/datakaveri/p3dx-gov-layer'
     REGISTRY_URI    = 'https://ghcr.io'
     REGISTRY_CRED   = 'datakaveri-ghcr'
-    DEPLOY_BRANCH   = 'main'                       // the branch whose builds are published
+    DEPLOY_BRANCH   = 'deploy_updates'             // the branch whose builds are published
     GITOPS_ENABLED  = 'false'                      // 'true' once environments/dev/p3dx-gov-layer.yaml exists in dx-gitops
     GITOPS_REPO     = 'datakaveri/dx-gitops'
     GITOPS_BRANCH   = 'dev'
