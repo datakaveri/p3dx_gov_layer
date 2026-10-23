@@ -1740,6 +1740,55 @@ paths:
           source: |
             curl --location --request GET 'https://v2.dev.iudx.io/gov-layer/api/v1/contracts/by-session/<sessionId>/signatures'
 
+  /api/v1/sessions/{submissionId}/removed-providers:
+    get:
+      tags:
+        - Projects
+      summary: List Providers Removed from an FL Session
+      description: |
+        Data providers removed from an FL session for declining to participate a second time
+        (see the FL negotiation flow). Returns an empty list when nobody was removed.
+      operationId: get-removed-providers
+      parameters:
+        - $ref: '#/components/parameters/FLSubmissionParam'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  removed_providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        submission_id:
+                          type: string
+                        username:
+                          type: string
+                        reason:
+                          type: string
+                          nullable: true
+                        removed_at:
+                          type: string
+                          format: date-time
+                          nullable: true
+              examples:
+                Example:
+                  value:
+                    status: SUCCESS
+                    removed_providers:
+                      - submission_id: fl-20261022-1a2b3c4d5e
+                        username: provider@example.org
+                        reason: declined twice
+                        removed_at: '2026-10-22T10:15:00Z'
+        '500':
+          description: Internal Server Error
   /api/v1/projects/{sessionId}:
     get:
       tags:
