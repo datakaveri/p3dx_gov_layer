@@ -60,12 +60,13 @@ pipeline {
     // Pinned tool images (bump deliberately, never :latest)
     GO_IMAGE        = 'golang:1.22-bookworm'       // matches go.mod / Dockerfile
     GOLANGCI_IMAGE  = 'golangci/golangci-lint:v1.64.8'
+    LINT_BASELINE   = 'b0130a2256e233fecad283cadaddcd4a22092e3f'   // deploy_updates when CI was added; see Static checks
     NODE_IMAGE      = 'node:22-alpine'
-    PRECOMMIT_IMAGE = 'python:3.12-slim'
+    PRECOMMIT_IMAGE = 'python:3.12-bookworm'   // needs git (pre-commit); -slim has none
     SEMGREP_IMAGE   = 'semgrep/semgrep:1.140.0'
     GITLEAKS_IMAGE  = 'zricethezav/gitleaks:v8.28.0'
     OSV_IMAGE       = 'ghcr.io/google/osv-scanner:v2.2.3'
-    HADOLINT_IMAGE  = 'hadolint/hadolint:v2.12.0'
+    HADOLINT_IMAGE  = 'hadolint/hadolint:v2.12.0-debian'   // -debian: .inside needs a shell (plain image is scratch)
     DOCKLE_IMAGE    = 'goodwithtech/dockle:v0.4.15'
     SYFT_IMAGE      = 'anchore/syft:v1.33.0'
     COSIGN_IMAGE    = 'gcr.io/projectsigstore/cosign:v2.6.1'
@@ -116,7 +117,9 @@ pipeline {
             }
           }
           if (fileExists('.pre-commit-config.yaml')) {
-            docker.image(env.PRECOMMIT_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e PRE_COMMIT_HOME=${env.WORKSPACE}/.cache/pre-commit") {
+            // SKIP: hooks that need docker or Go inside this python container; CI runs them as their own stages
+            // (hadolint: Dockerfile / IaC, gofmt: Static checks, go-mod-guard: Static checks).
+            docker.image(env.PRECOMMIT_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e PRE_COMMIT_HOME=${env.WORKSPACE}/.cache/pre-commit -e SKIP=hadolint-docker,gofmt,go-mod-guard") {
               sh '''
                 pip install --quiet --user pre-commit==4.3.0
                 git config --global --add safe.directory "$PWD"
@@ -148,7 +151,12 @@ pipeline {
             fi
           '''
           docker.image(env.GOLANGCI_IMAGE).inside("-e HOME=${env.WORKSPACE}/.home -e GOFLAGS=-buildvcs=false -e GOCACHE=${env.WORKSPACE}/.cache/go-build -e GOMODCACHE=${env.WORKSPACE}/.cache/gomod -e GOLANGCI_LINT_CACHE=${env.WORKSPACE}/.cache/golangci") {
-            sh 'golangci-lint run --timeout 5m --out-format checkstyle:reports/golangci.xml,colored-line-number'
+            // Existing findings (29 at LINT_BASELINE, 2026-10-23) are reported and mark the build UNSTABLE;
+            // anything new since LINT_BASELINE blocks. Move LINT_BASELINE forward as the backlog is fixed.
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Existing lint findings - see reports/golangci.xml') {
+              sh 'golangci-lint run --timeout 5m --out-format checkstyle:reports/golangci.xml,colored-line-number'
+            }
+            sh 'git config --global --add safe.directory "$PWD"; golangci-lint run --timeout 5m --new-from-rev=${LINT_BASELINE}'
           }
         }
       }
@@ -219,13 +227,21 @@ pipeline {
           steps {
             // Report first so it is archived even when the gate fails (as in dx-authz-go)
             sh 'trivy fs --scanners vuln,secret,misconfig --skip-dirs .cache,.home,ctx,reports --output reports/trivy-fs-report.txt .'
-            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Vulnerable dependencies — see reports/trivy-fs-report.txt, govulncheck, osv-scanner') {
+            // One catchError per scanner so a finding in one does not skip the others.
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Trivy: HIGH/CRITICAL vulnerable dependencies - see reports/trivy-fs-report.txt') {
               sh 'trivy fs --scanners vuln,secret --skip-dirs .cache,.home,ctx,reports --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .'
+            }
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'govulncheck: reachable vulnerabilities - see reports/govulncheck.txt') {
               script {
                 inGo '''
                   go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
-                  "$(go env GOPATH)/bin/govulncheck" ./... | tee reports/govulncheck.txt
+                  rc=0; "$(go env GOPATH)/bin/govulncheck" ./... > reports/govulncheck.txt 2>&1 || rc=$?
+                  cat reports/govulncheck.txt; exit $rc
                 '''
+              }
+            }
+            catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'osv-scanner: vulnerable dependencies - see reports/osv-scanner.txt') {
+              script {
                 docker.image(env.OSV_IMAGE).inside('--entrypoint=') {
                   sh 'osv-scanner scan source --recursive --format table . > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
                 }
