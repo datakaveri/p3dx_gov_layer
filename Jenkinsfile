@@ -243,7 +243,7 @@ pipeline {
             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'osv-scanner: vulnerable dependencies - see reports/osv-scanner.txt') {
               script {
                 docker.image(env.OSV_IMAGE).inside('--entrypoint=') {
-                  sh 'osv-scanner scan source --recursive --format table . > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
+                  sh '/osv-scanner scan source --recursive --format table . > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
                 }
               }
             }
