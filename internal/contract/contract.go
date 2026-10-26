@@ -12,8 +12,36 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 )
+
+// FLRunConfig is the owner's FL training parameters, carried in the signed
+// contract. Validate's ranges keep one training call under the ~4-min
+// inter-VM gRPC hang and match the quicksetup config's 100-round ceiling.
+type FLRunConfig struct {
+	NumRounds    int     `json:"num_rounds"`
+	LocalEpochs  int     `json:"local_epochs"`
+	LearningRate float64 `json:"learning_rate"`
+	BatchSize    int     `json:"batch_size"`
+}
+
+// Validate rejects out-of-range training parameters.
+func (c *FLRunConfig) Validate() error {
+	if c.NumRounds < 1 || c.NumRounds > 100 {
+		return fmt.Errorf("num_rounds must be between 1 and 100, got %d", c.NumRounds)
+	}
+	if c.LocalEpochs < 1 || c.LocalEpochs > 5 {
+		return fmt.Errorf("local_epochs must be between 1 and 5, got %d", c.LocalEpochs)
+	}
+	if !(c.LearningRate > 0 && c.LearningRate <= 1) {
+		return fmt.Errorf("learning_rate must be greater than 0 and at most 1, got %v", c.LearningRate)
+	}
+	if c.BatchSize < 1 || c.BatchSize > 1024 {
+		return fmt.Errorf("batch_size must be between 1 and 1024, got %d", c.BatchSize)
+	}
+	return nil
+}
 
 // Signature carries per-party consent state: nil until the party signs, then
 // the time they did. It is a bookkeeping timestamp only — no signature bytes
@@ -222,6 +250,10 @@ type Contract struct {
 	Lifecycle     Lifecycle   `json:"lifecycle"`
 	Technique     string      `json:"technique"`
 	ComputeChoice string      `json:"compute_choice"`
+	// FLConfig is the FL output owner's training parameters. It is covered by
+	// the contract hash, so every data provider's signature binds them to
+	// these values. Required on FL contracts; nil (and omitted) for non-FL ones.
+	FLConfig *FLRunConfig `json:"fl_config,omitempty"`
 	// Purpose is the consumer's stated purpose for processing, shown to data
 	// providers in the DPDP Rule 3 consent notice. It is covered by the
 	// contract hash, so a provider's signature binds them to this purpose

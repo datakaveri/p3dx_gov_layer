@@ -82,7 +82,9 @@ func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID strin
 // most recent contract, since a restart reuses the same accepted roster
 // without redoing invite/accept.
 // validity sets Lifecycle.ValidUntil (now + validity); FL_CONTRACT_VALIDITY.
-func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string, validity time.Duration) (*contract.Contract, error) {
+// flConfig is the owner's training parameters, recorded in the
+// contract so the hash providers sign covers them.
+func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string, validity time.Duration, flConfig *contract.FLRunConfig) (*contract.Contract, error) {
 	if pathway == "" {
 		pathway = "FL"
 	}
@@ -134,6 +136,7 @@ func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string
 		},
 		Technique:     "FL",
 		ComputeChoice: "FEDERATED_LEARNING",
+		FLConfig:      flConfig,
 		Parties: contract.Parties{
 			User: contract.UserParty{
 				ID:        ownerUserID,

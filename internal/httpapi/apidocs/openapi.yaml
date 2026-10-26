@@ -986,6 +986,7 @@ paths:
           - `output_owner_user_id` : The output owner's Keycloak user id
           - `parties` : The data providers, each with `id`, `username`, `dataset_name` and `data_url`
           - `finalize` : `true` for the final roster contract
+          - `fl_config` : Training parameters, recorded in the signed contract. Missing → `400 MISSING_FL_CONFIG`; out-of-range values → `400 INVALID_FL_CONFIG`
         required: true
         content:
           application/json:
@@ -1012,8 +1013,35 @@ paths:
                 finalize:
                   type: boolean
                   default: false
+                fl_config:
+                  type: object
+                  description: The owner's FL training parameters (covered by the contract hash).
+                  properties:
+                    num_rounds:
+                      type: integer
+                      minimum: 1
+                      maximum: 100
+                    local_epochs:
+                      type: integer
+                      minimum: 1
+                      maximum: 5
+                    learning_rate:
+                      type: number
+                      minimum: 0
+                      exclusiveMinimum: true
+                      maximum: 1
+                    batch_size:
+                      type: integer
+                      minimum: 1
+                      maximum: 1024
+                  required:
+                    - num_rounds
+                    - local_epochs
+                    - learning_rate
+                    - batch_size
               required:
                 - submission_id
+                - fl_config
             examples:
               Final Roster:
                 value:
@@ -1025,6 +1053,11 @@ paths:
                       dataset_name: hospital-admissions-2025
                       data_url: https://data.example.com/admissions.csv
                   finalize: true
+                  fl_config:
+                    num_rounds: 10
+                    local_epochs: 1
+                    learning_rate: 0.01
+                    batch_size: 32
       responses:
         '201':
           description: Created

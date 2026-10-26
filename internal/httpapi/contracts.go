@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/contract"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
 )
 
@@ -15,9 +16,10 @@ import (
 // row per contract, never reused). Called by the AAA layer both when the
 // owner sends the participation request (finalize=false) and when the owner
 // sends the final roster (finalize=true), as well as by "Start Again"
-// (p3dx-aaa's /gov/restart-fl-session). ip/port and the FL config are filled
-// server-side; provider user_ids come from Keycloak via the parties list, the
-// owner user_id from output_owner_user_id (req.user.sub). A new project_id is
+// (p3dx-aaa's /gov/restart-fl-session). ip/port are filled server-side; the
+// required fl_config (the owner's training parameters) is range-checked and
+// recorded in the signed contract; provider user_ids come from Keycloak via
+// the parties list, the owner user_id from output_owner_user_id (req.user.sub). A new project_id is
 // generated on every call.
 func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -25,6 +27,7 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		OutputOwnerUserID string                  `json:"output_owner_user_id"`
 		Parties           []db.ContractPartyInput `json:"parties"`
 		Finalize          bool                    `json:"finalize"`
+		FLConfig          *contract.FLRunConfig   `json:"fl_config"`
 	}
 	if !s.readBody(w, r, &body) {
 		return
@@ -36,8 +39,21 @@ func (s *Server) postContract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if body.FLConfig == nil {
+		writeJSON(w, http.StatusBadRequest, j{
+			"status": "FAILED", "error": "MISSING_FL_CONFIG", "message": "fl_config is required",
+		})
+		return
+	}
+	if err := body.FLConfig.Validate(); err != nil {
+		writeJSON(w, http.StatusBadRequest, j{
+			"status": "FAILED", "error": "INVALID_FL_CONFIG", "message": err.Error(),
+		})
+		return
+	}
+
 	// thsi will build the contract  and
-	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL", s.cfg.KBSURL, s.cfg.FLContractValidity)
+	contract, err := s.db.BuildContract(reqCtx(r), body.SubmissionID, body.OutputOwnerUserID, body.Parties, body.Finalize, "FL", s.cfg.KBSURL, s.cfg.FLContractValidity, body.FLConfig)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, j{
