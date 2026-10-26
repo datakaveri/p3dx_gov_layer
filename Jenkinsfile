@@ -204,7 +204,7 @@ pipeline {
                 }
                 inGo '''
                   go install github.com/securego/gosec/v2/cmd/gosec@v2.22.8
-                  "$(go env GOPATH)/bin/gosec" -severity high -confidence medium -fmt json -out reports/gosec.json -stdout ./...
+                  "$(go env GOPATH)/bin/gosec" -exclude-dir=.cache -exclude-dir=.home -exclude-dir=reports -severity high -confidence medium -fmt json -out reports/gosec.json -stdout ./...
                 '''
               }
             }
