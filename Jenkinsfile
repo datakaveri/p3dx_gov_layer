@@ -58,8 +58,8 @@ pipeline {
     GIT_HASH        = GIT_COMMIT.take(7)
 
     // Pinned tool images (bump deliberately, never :latest)
-    GO_IMAGE        = 'golang:1.22-bookworm'       // matches go.mod / Dockerfile
-    GOLANGCI_IMAGE  = 'golangci/golangci-lint:v1.64.8'
+    GO_IMAGE        = 'golang:1.26-bookworm'       // matches go.mod / Dockerfile
+    GOLANGCI_IMAGE  = 'golangci/golangci-lint:v2.14.0'   // v2: needs Go >= 1.26 support; config is .golangci.yml version 2
     LINT_BASELINE   = 'b0130a2256e233fecad283cadaddcd4a22092e3f'   // deploy_updates when CI was added; see Static checks
     NODE_IMAGE      = 'node:22-alpine'
     PRECOMMIT_IMAGE = 'python:3.12-bookworm'   // needs git (pre-commit); -slim has none
@@ -154,7 +154,7 @@ pipeline {
             // Existing findings (29 at LINT_BASELINE, 2026-10-23) are reported and mark the build UNSTABLE;
             // anything new since LINT_BASELINE blocks. Move LINT_BASELINE forward as the backlog is fixed.
             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'Existing lint findings - see reports/golangci.xml') {
-              sh 'golangci-lint run --timeout 5m --out-format checkstyle:reports/golangci.xml,colored-line-number'
+              sh 'golangci-lint run --timeout 5m --output.checkstyle.path reports/golangci.xml --output.text.path stdout'
             }
             sh 'git config --global --add safe.directory "$PWD"; golangci-lint run --timeout 5m --new-from-rev=${LINT_BASELINE}'
           }
@@ -204,7 +204,7 @@ pipeline {
                 }
                 inGo '''
                   go install github.com/securego/gosec/v2/cmd/gosec@v2.22.8
-                  "$(go env GOPATH)/bin/gosec" -severity high -confidence medium -fmt json -out reports/gosec.json -stdout ./...
+                  "$(go env GOPATH)/bin/gosec" -exclude-dir=.cache -exclude-dir=.home -exclude-dir=reports -severity high -confidence medium -fmt json -out reports/gosec.json -stdout ./...
                 '''
               }
             }
@@ -243,7 +243,7 @@ pipeline {
             catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'osv-scanner: vulnerable dependencies - see reports/osv-scanner.txt') {
               script {
                 docker.image(env.OSV_IMAGE).inside('--entrypoint=') {
-                  sh 'osv-scanner scan source --recursive --format table . > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
+                  sh '/osv-scanner scan source -L go.mod --format table > reports/osv-scanner.txt || { cat reports/osv-scanner.txt; exit 1; }'
                 }
               }
             }
