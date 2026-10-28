@@ -4,6 +4,10 @@
 # Run:    docker run --env-file .env -p 8083:8083 \
 #           -v "$PWD/keys:/app/keys" -v "$PWD/data:/app/data" p3dx-gov-layer
 #
+# Migrate (once per deploy, before the server replicas; then run them with
+# -e DB_AUTO_MIGRATE=false):
+#         docker run --env-file .env --entrypoint /app/gov-layer-migrate p3dx-gov-layer
+#
 # .env is NOT baked into the image — pass it at runtime with --env-file.
 # Set APD_BASE_URL to the hosted dev APD. Inside the container "localhost" is
 # the container itself, so point DB_HOST at the host's Postgres (e.g.
@@ -18,20 +22,21 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gov-layer ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gov-layer ./cmd/server \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gov-layer-migrate ./cmd/migrate
 
 # ---- runtime stage ----
 FROM debian:bookworm-slim
 
 # python3: /final-model/inspect runs the embedded inspect_model.py (stdlib only).
-# ca-certificates: HTTPS calls to Keycloak / catalogue / IUDX APD.
+# ca-certificates: HTTPS calls to Keycloak / catalogue / APD.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates python3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app gov
 
 WORKDIR /app
-COPY --from=build /out/gov-layer /app/gov-layer
+COPY --from=build /out/gov-layer /out/gov-layer-migrate /app/
 
 # keys/  — governance signing key (generated on first start; persist it, or
 #          every new container signs contracts with a different key)

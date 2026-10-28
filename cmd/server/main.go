@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/platform/govcrypto"
 	"log"
 	"net/http"
 	"os"
@@ -14,10 +15,9 @@ import (
 	"time"
 
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/config"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/db"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/httpapi"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/keycloak"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/services"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/integration/keycloak"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/repository/postgres"
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/transport/httpapi"
 )
 
 func main() {
@@ -27,8 +27,8 @@ func main() {
 
 	ctx := context.Background()
 
-	// Initialize the database (auto-create + migrate), matching initializeApp().
-	database, err := db.Initialize(ctx, cfg)
+	// Open the database and check (or, with DB_AUTO_MIGRATE, apply) its schema.
+	database, err := postgres.Initialize(ctx, cfg)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to start server: %v", err)
 	}
@@ -37,7 +37,7 @@ func main() {
 	kc := keycloak.New(cfg)
 
 	// gov_layer's own contract-signing key pair (generated on first start).
-	govKey, err := services.LoadOrCreateGovernanceKey(cfg.GovSigningKeyPath)
+	govKey, err := govcrypto.LoadOrCreateGovernanceKey(cfg.GovSigningKeyPath)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to load governance signing key: %v", err)
 	}
@@ -46,7 +46,7 @@ func main() {
 	// The same key is the CA for Flotilla gateway TLS certificates; its
 	// self-signed certificate is generated on first start (or when it no
 	// longer matches the key).
-	govCA, govCAPEM, err := services.LoadOrCreateGovernanceCACert(cfg.GovCACertPath, govKey)
+	govCA, govCAPEM, err := govcrypto.LoadOrCreateGovernanceCACert(cfg.GovCACertPath, govKey)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to load governance CA certificate: %v", err)
 	}

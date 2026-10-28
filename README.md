@@ -91,41 +91,29 @@ Contract includes: `technique` ("FL" | "TEE" | "SMPC"), `datasets` ([{id, name},
 |------|---------|
 | `config/config.go` | Loads all runtime config from the environment and the service's own `.env` (**override** semantics so a sibling service's exported vars can't hijack this one). Holds the `Config` struct: DB connection, ports, and Keycloak settings. |
 
-### `internal/db` — PostgreSQL data layer (pgx)
-| File | Purpose |
-|------|---------|
-| `db/db.go` | Opens the connection pool, auto-creates the `p3dx_governance` database if missing, and runs idempotent **migrations** (`notifications`, `contracts`). |
-| `db/types.go` | Custom JSON types: `Real` (emits shortest float32 decimal so JSON matches the Node output) and `BigInt` (int64 that serializes safely). |
-| `db/helpers.go` | Shared helpers: `newID`/base36 id generation and the `jsonbOr` coercion used by inserts. |
-| `db/forms_cache.go` | In-memory cache of forms pushed here by aaa (`formsCache`) — no HTTP calls, no persistence. Read by the methods below; written only by `httpapi/forms_ingest.go`. |
-| `db/fl_forms.go` | Output-owner form: the `FormSubmission` struct and `GetFormSubmissionByID`/`GetLatestSessionForProvider`/`IngestFormSubmission`/`RemoveFormSubmission`, all backed by `forms_cache.go`. |
-| `db/fl_provider_forms.go` | Data-provider form: the `DataProviderForm` struct and `GetDataProviderFormsByUsernames`/`IngestDataProviderForm`, backed by `forms_cache.go`. |
-| `db/fl_notifications.go` | The `notifications` table and the whole consent loop: `CreateNotification`, `GetNotificationsForUser`, `MarkNotificationAsRead`, `RespondToNotification` (accepted/declined + reason), and `GetNotificationsBySender` (owner's responses view). |
-| `db/fl_messages.go` | The mock `GetDataProviders` list and `StoreProviderMessage` (lazily-created `provider_messages` table for `/send-provider-message`). |
-| `db/contracts.go` | The per-session FL contract in the standard contract JSON format (`project_id`, `lifecycle`, `parties`, `session_info`, `signatures`). Signing is timestamp-only consent tracking: `BuildContract` signs the output-owner party immediately (they're the one submitting), and `SignDataProviderParty` signs a data-provider party when they accept their participation notification (called from `httpapi/fl_notifications.go`). Signatures carry forward from the draft to the final-roster contract for the same session. |
+### Package layout
 
-### `internal/httpapi` — REST API
-| File | Purpose |
-|------|---------|
-| `httpapi/server.go` | Wires the router (chi), CORS, JSON helpers, and mounts every route under both `/api/v1` and `/governance`. Holds the `Server` (config + DB + Keycloak). |
-| `httpapi/general_contract.go` | `POST /contract` — unified contract endpoint for FL/TEE/SMPC. Routes by technique, fetches forms/policies from APD, authorizes, and orchestrates accordingly. |
-| `httpapi/fl_notifications.go` | Request handlers for notifications (create / list / read / **respond** / **by-sender**). |
-| `httpapi/fl_forms.go` | Request handlers for mock provider directory and provider messages. |
-| `httpapi/model.go`, `httpapi/inspect_model.py` | `GET /final-models`, `/final-model/download`, `/final-model/summary` — locates and summarizes flo_server's final model checkpoints via embedded `.pt` reader. |
+Each kind of code has one home. Dependencies point inward:
+`transport → application → domain`; `repository` and `integration` are used by
+the outer layers, and `domain` imports nothing else from this module.
 
-### `internal/services` — Business logic
-| File | Purpose |
-|------|---------|
-| `services/apd.go` | APD integration: `FetchDatasetForm()` for FL, `AuthorizeContractAgainstAPD()` for General pathway, policy evaluation, private dataset email notifications. |
-| `services/token.go` | Keycloak token validation via JWKS, claim extraction. |
-| `services/crypto.go` | RSA signature verification and signing operations. |
-| `services/storage.go` | `SecureStore()` — AES-GCM encryption of contracts to disk. |
-| `services/enclave.go` | `DeployEnclave()` — HTTP POST of signed contracts to TEE/SMPC executor. |
+| Folder | Kind of code | Contents |
+|--------|--------------|----------|
+| `internal/domain/contract` | Rules | The standard contract JSON shape (`Contract`, parties, signatures) and its validation. |
+| `internal/domain/workload` | Rules | Known TEE workloads (`KnownWorkloads`) and the policy check `PolicyAllowsWorkload`. |
+| `internal/application/contractgen` | Steps | `BuildGeneratedContract` — assembles a contract from datasets, infra and policies. |
+| `internal/repository/postgres` | Database | pgx connection pool, every table's queries, and numbered migrations (`migrations/*.sql`, run by `cmd/migrate`). |
+| `internal/integration/apd` | Other services | p3dx-apd: policy fetch/evaluation, provider forms, consumer grants. |
+| `internal/integration/catalogue` | Other services | Provider catalogue and DX catalogue lookups. |
+| `internal/integration/keycloak` | Other services | Service-account token client (`keycloak.go`) and access-token validation via JWKS (`token.go`). |
+| `internal/integration/tee` | Other services | Enclave deploy, Azure VM control, MAA attestation, and the APD-facing `TEEContract`. |
+| `internal/integration/userdir` | Other services | User directory and Flotilla credential grants. |
+| `internal/platform/govcrypto` | Shared plumbing | Governance key and CA, contract-hash signatures, RSA helpers, AES-GCM `SecureStore`. |
+| `internal/transport/httpapi` | APIs | chi router (`server.go`), every HTTP handler, OpenAPI docs, `inspect_model.py`. |
+| `internal/config` | Shared plumbing | Environment / `.env` config loading. |
 
-### `internal/keycloak` — optional service-account auth
-| File | Purpose |
-|------|---------|
-| `keycloak/keycloak.go` | Optionally fetches and caches a Keycloak service-account token (client-credentials grant). Falls back to a static `PUSH_AUTH_TOKEN` when Keycloak isn't configured. |
+There is no `internal/worker` yet: nothing runs in the background outside a
+request. Add it when the first scheduled or queue-driven job appears.
 
 ### Other
 | Path | Purpose |
@@ -135,7 +123,14 @@ Contract includes: `technique` ("FL" | "TEE" | "SMPC"), `datasets` ([{id, name},
 
 ---
 
-## Data model (tables, auto-migrated)
+## Data model (tables, from `internal/repository/postgres/migrations`)
+
+Schema changes go in a new numbered file, `internal/repository/postgres/migrations/NNNN_description.sql`.
+Never edit a file that has already been applied. Each file runs once, in a
+transaction, and is recorded in `schema_migrations` (version, name, applied_at).
+Deploy order: run `gov-layer-migrate` once, then start the servers with
+`DB_AUTO_MIGRATE=false`. Single-instance/local runs can keep the default
+(`true`), which applies pending files at startup under a Postgres advisory lock.
 
 - **`notifications`** — consent loop: `recipient_*`, `sender_username`, `message`,
   `payload` (JSONB, carries `kind`/`submission_id`/provider lists), `read`,
@@ -161,6 +156,7 @@ semantics, so this service's values win over any inherited shell variables.
 | `CORS_ORIGINS` | Comma-separated allowed origins | — |
 | **Database** |
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | PostgreSQL connection | `localhost` / `5432` / `p3dx_governance` / `postgres` / `postgres` |
+| `DB_AUTO_MIGRATE` | Apply pending migrations at server startup. Set `false` when the migrate job runs them (multiple replicas) | `true` |
 | **Authentication** |
 | `KEYCLOAK_BASE_URL` / `KEYCLOAK_REALM` / `KEYCLOAK_CLIENT_ID` / `KEYCLOAK_CLIENT_SECRET` | Keycloak service-account auth | — |
 | `PUSH_AUTH_TOKEN` | Legacy `X-Auth-Token` fallback when Keycloak is unset | — |
@@ -215,27 +211,12 @@ All REST routes are mounted under **both** `/api/v1` and `/governance` (CORS ena
 
 ### Notifications & Consent (FL-Specific)
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `POST` | `/notifications` | Create participation-request notifications |
-| `GET` | `/notifications/{key}` | Fetch notifications for a user |
-| `GET` | `/notifications/by-sender/{key}` | Fetch notifications sent by a user |
-| `PATCH` | `/notifications/{key}/read` | Mark notification as read |
-| `POST` | `/notifications/{key}/respond` | Provider responds (accepted/declined + reason); accepting also signs that provider's party on the session's contract (best-effort, via the notification's `submission_id` payload field) |
-
-### Data Providers & Messages
-
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/data-providers` | List registered data providers |
-| `POST` | `/send-provider-message` | Send message to a data provider |
+Users read and answer their own notifications under `/me/notifications` (identity from the token). Answering a participation request with `accepted` also signs that provider's party on the session's contract (best-effort, via the notification's `submission_id` payload field).
 
 ### Final Models
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/final-models` | List final (highest-round) models for all sessions |
-| `GET` | `/final-model/download` | Download model checkpoint file |
 | `GET` | `/final-model/summary` | Get model architecture summary |
 
 #### FL Orchestration (FL-Specific)

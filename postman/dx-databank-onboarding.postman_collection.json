@@ -777,10 +777,10 @@
               }
             ],
             "url": "{{gov_url}}/job/approval/data-provider",
-            "description": "Approves the caller's datasets (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c). The signature is verified at once (it must be over the contract_hash stored with the contract, and verify with the registered public key) and stored on the contract; then, per accepted dataset, the consumer grant is posted to the local p3dx-apd (grants) and the IUDX APD policy to IUDX_APD_POLICY_URL with this token (iudx_policies). The policy is built from the stored contract (consumer, expiry, workload, trustee, callbackUrl); provider_comment / feedback_to_consumer are optional and copied into it. An IUDX failure doesn't fail the approval - it is reported in iudx_policies.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{data_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into data_provider_signature.",
+            "description": "Approves the caller's datasets (role and catalogue checks with their own token) and submits their signature of contract_hash (from the job request, 1c). The signature is verified at once (it must be over the contract_hash stored with the contract, and verify with the registered public key) and stored on the contract; then, per accepted dataset, the consumer grant is posted to the local p3dx-apd (grants). A failed grant doesn't fail the approval - it is reported in grants.\n\nBefore sending, sign on the provider's machine: `scripts/contract-sign.sh approve-request {{data_provider_id}} keys/providers/<name>/private.pem {{job_id}}` and paste the signature into data_provider_signature.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{data_provider_signature}}\",\n  \"provider_comment\": \"{{provider_comment}}\",\n  \"feedback_to_consumer\": \"{{feedback_to_consumer}}\"\n}",
+              "raw": "{\n  \"job_id\": \"{{job_id}}\",\n  \"contract_hash\": \"{{contract_hash}}\",\n  \"signature\": \"{{data_provider_signature}}\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -814,8 +814,6 @@
                   "pm.test('signature verified against the registered public key', () => pm.expect(d.signature && d.signature.verified).to.eql(true));",
                   "(d.grants || []).forEach(g => console.log('  APD policy', g.item_type, g.item_id, g.status, g.policy_id || '', g.error || ''));",
                   "pm.test('APD policy posted: consumer may use the dataset', () => pm.expect((d.grants || []).some(g => g.item_type === 'dataset' && g.status === 'posted')).to.eql(true));",
-                  "(d.iudx_policies || []).forEach(p => console.log('  IUDX policy', p.item_id, p.status, p.policy_id || '', p.error || ''));",
-                  "pm.test('IUDX APD policy posted for the dataset', () => pm.expect((d.iudx_policies || []).some(p => p.status === 'posted')).to.eql(true));",
                   "pm.test('job approved', () => pm.expect(d.job_approval).to.eql('accepted'));",
                   "if (d.error === 'INVALID_SIGNATURE') console.log('signature rejected:', d.message);"
                 ]
@@ -886,7 +884,7 @@
           ]
         }
       ],
-      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. The data provider's signature is verified at once against the contract_hash stored with the contract at 1b and their registered public key - a bad one is refused and nothing is recorded. On acceptance 2b also posts, for each of their datasets, the consumer grant to the local p3dx-apd and the IUDX APD policy (IUDX_APD_POLICY_URL, with the data provider's own token). Step 3 cross-verifies every signature again before the job is approved.\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
+      "description": "Each approval call (2b data provider, 2c infra provider) approves that provider's own items (role and catalogue checks with their own token) and submits their signature of the contract hash from the job request. The data provider's signature is verified at once against the contract_hash stored with the contract at 1b and their registered public key - a bad one is refused and nothing is recorded. On acceptance 2b also posts, for each of their datasets, the consumer grant to the local p3dx-apd. Step 3 cross-verifies every signature again before the job is approved.\n\n[dummy] Infra-provider requests here are skipped while the collection variable skip_infra_flow is \"true\" - for now only the data-provider side is checked. Set skip_infra_flow to \"false\" to run it again."
     },
     {
       "name": "3. Cross-verify signatures + job status (consumer)",
@@ -1373,14 +1371,6 @@
     {
       "key": "data_provider_signature",
       "value": ""
-    },
-    {
-      "key": "provider_comment",
-      "value": "The resource is used for the job's TEE run"
-    },
-    {
-      "key": "feedback_to_consumer",
-      "value": "Access is limited to this job and contract"
     },
     {
       "key": "infra_provider_signature",

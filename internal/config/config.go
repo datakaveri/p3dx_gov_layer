@@ -30,6 +30,10 @@ type Config struct {
 	DBName     string // DB_NAME (default p3dx_governance)
 	DBUser     string // DB_USER (default postgres)
 	DBPassword string // DB_PASSWORD (default postgres)
+	// DBAutoMigrate: apply pending migrations at startup. Set
+	// DB_AUTO_MIGRATE=false where the migrate job (cmd/migrate) runs them
+	// once per deploy; the server then only checks the schema is current.
+	DBAutoMigrate bool // DB_AUTO_MIGRATE (default true)
 
 	// --- keycloak service-account auth ---
 	KeycloakTokenURL string
@@ -135,6 +139,18 @@ type Config struct {
 	OrchestratorClientID string // ORCHESTRATOR_CLIENT_ID (default p3dx-fl-orchestrator)
 	OrchestratorRole     string // ORCHESTRATOR_ROLE (default fl-orchestrator)
 	FlotillaVMClientID   string // FLOTILLA_VM_CLIENT_ID (default flotilla-vm)
+	// Flotilla FL client-VM credentials (fl_vm_credentials.go): the
+	// flotilla-vm client in the users' Keycloak (USER_KEYCLOAK_*) — confidential,
+	// direct grant only — mints each VM's offline token. Its offline sessions
+	// are swept every FLVMSweepInterval (0 disables the sweep).
+	FlotillaVMClientSecret string        // FLOTILLA_VM_CLIENT_SECRET
+	FLVMSweepInterval      time.Duration // FL_VM_SWEEP_INTERVAL_MS (default 600000)
+
+	// p3dx-fl-orchestrator's own API, for the FL session routes (fl_session.go):
+	// on session start gov_layer reports how many providers to expect.
+	// InternalServiceKey must match that service's INTERNAL_SERVICE_KEY.
+	OrchestratorServiceURL string // ORCHESTRATOR_SERVICE_URL (e.g. http://localhost:3002)
+	InternalServiceKey     string // INTERNAL_SERVICE_KEY
 
 	// FLContractValidity is how long an FL roster contract is valid from the
 	// moment it is built (Lifecycle.ValidUntil); gateway certificates expire
@@ -157,7 +173,7 @@ type Config struct {
 	UserKeycloakClientSecret string // USER_KEYCLOAK_CLIENT_SECRET
 	// Realm role the job-approval data-provider check looks for. The dev
 	// Keycloak calls it "provider".
-	DataProviderRole string // DATA_PROVIDER_ROLE (default "data-provider")
+	DataProviderRole string // DATA_PROVIDER_ROLE (default "provider", the DX role)
 
 	// --- DX catalogue (job-approval data-provider check, job_approval.go) ---
 	// POST /job/approval/data-provider carries the data provider's own dev
@@ -190,12 +206,6 @@ type Config struct {
 	// ContractCallbackURL is the base of a TEE contract's callbackUrl;
 	// "/<contract_id>" is appended. Blank leaves callbackUrl out.
 	ContractCallbackURL string // CONTRACT_CALLBACK_URL
-
-	// --- IUDX APD policy, posted per accepted dataset at
-	// POST /job/approval/data-provider with the data provider's own token.
-	// Blank IUDXAPDPolicyURL skips it.
-	IUDXAPDPolicyURL      string // IUDX_APD_POLICY_URL
-	IUDXPolicyCallbackURL string // IUDX_POLICY_CALLBACK_URL; "/<job_id>" is appended
 
 	// --- ad-hoc VM provisioning (httpapi/vm_provision.go) ---
 	// Unlike the TEE flow above, this creates a brand-new VM per request
@@ -235,6 +245,8 @@ func Load() *Config {
 		DBName:     getEnv("DB_NAME", "p3dx_governance"),
 		DBUser:     getEnv("DB_USER", "postgres"),
 		DBPassword: getEnv("DB_PASSWORD", "postgres"),
+
+		DBAutoMigrate: getEnvBool("DB_AUTO_MIGRATE", true),
 
 		KeycloakTokenURL: keycloakTokenURL(),
 		KeycloakClientID: os.Getenv("KEYCLOAK_CLIENT_ID"),
@@ -299,11 +311,15 @@ func Load() *Config {
 		RequireSignedContract: getEnvBool("REQUIRE_SIGNED_CONTRACT", getEnvBool("TEE_REQUIRE_SIGNED_CONTRACT", true)),
 		GovSigningKeyPath:     getEnv("GOV_SIGNING_KEY_PATH", "keys/governance_signing_key.pem"),
 
-		GovCACertPath:        getEnv("GOV_CA_CERT_PATH", "./keys/governance_ca.pem"),
-		OrchestratorClientID: getEnv("ORCHESTRATOR_CLIENT_ID", "p3dx-fl-orchestrator"),
-		OrchestratorRole:     getEnv("ORCHESTRATOR_ROLE", "fl-orchestrator"),
-		FlotillaVMClientID:   getEnv("FLOTILLA_VM_CLIENT_ID", "flotilla-vm"),
-		FLContractValidity:   getEnvDuration("FL_CONTRACT_VALIDITY", DefaultFLContractValidity),
+		GovCACertPath:          getEnv("GOV_CA_CERT_PATH", "./keys/governance_ca.pem"),
+		OrchestratorClientID:   getEnv("ORCHESTRATOR_CLIENT_ID", "p3dx-fl-orchestrator"),
+		OrchestratorRole:       getEnv("ORCHESTRATOR_ROLE", "fl-orchestrator"),
+		OrchestratorServiceURL: os.Getenv("ORCHESTRATOR_SERVICE_URL"),
+		InternalServiceKey:     os.Getenv("INTERNAL_SERVICE_KEY"),
+		FlotillaVMClientID:     getEnv("FLOTILLA_VM_CLIENT_ID", "flotilla-vm"),
+		FlotillaVMClientSecret: os.Getenv("FLOTILLA_VM_CLIENT_SECRET"),
+		FLVMSweepInterval:      getEnvMS("FL_VM_SWEEP_INTERVAL_MS", 600000),
+		FLContractValidity:     getEnvDuration("FL_CONTRACT_VALIDITY", DefaultFLContractValidity),
 
 		UserKeycloakBaseURL:       getEnv("USER_KEYCLOAK_BASE_URL", "http://localhost:8080"),
 		UserKeycloakRealm:         getEnv("USER_KEYCLOAK_REALM", "master"),
@@ -311,7 +327,7 @@ func Load() *Config {
 		UserKeycloakAdminPassword: os.Getenv("USER_KEYCLOAK_ADMIN_PASSWORD"),
 		UserKeycloakClientID:      os.Getenv("USER_KEYCLOAK_CLIENT_ID"),
 		UserKeycloakClientSecret:  os.Getenv("USER_KEYCLOAK_CLIENT_SECRET"),
-		DataProviderRole:          getEnv("DATA_PROVIDER_ROLE", "data-provider"),
+		DataProviderRole:          getEnv("DATA_PROVIDER_ROLE", "provider"),
 
 		CatalogueBaseURL: strings.TrimRight(getEnv("CATALOGUE_BASE_URL", "https://v2.dev.iudx.io/controlplane/iudx/v2/cat"), "/"),
 		CatalogueTimeout: getEnvMS("CATALOGUE_TIMEOUT_MS", 10000),
@@ -324,9 +340,6 @@ func Load() *Config {
 		ResultReadURL:    strings.TrimSpace(os.Getenv("RESULT_READ_URL")),
 
 		ContractCallbackURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CONTRACT_CALLBACK_URL")), "/"),
-
-		IUDXAPDPolicyURL:      os.Getenv("IUDX_APD_POLICY_URL"),
-		IUDXPolicyCallbackURL: os.Getenv("IUDX_POLICY_CALLBACK_URL"),
 	}
 	c.DataProviderJWKSURL = getEnv("DATA_PROVIDER_JWKS_URL",
 		strings.TrimRight(c.UserKeycloakBaseURL, "/")+"/realms/"+c.UserKeycloakRealm+"/protocol/openid-connect/certs")
