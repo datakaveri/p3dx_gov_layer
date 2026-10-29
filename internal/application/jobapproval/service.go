@@ -37,7 +37,7 @@ type Repo interface {
 // and a provider's infras in their APD catalogue.
 type Catalogue interface {
 	Item(ctx context.Context, itemID, token string) (catalogue.DXCatalogueItem, error)
-	ProviderInfra(providerID string) ([]catalogue.CatalogueItem, error)
+	ProviderInfra(providerID string) ([]catalogue.APDCatalogueItem, error)
 }
 
 // APD reads infra policies and posts consumer grants.
@@ -421,7 +421,7 @@ func (s *Service) dataProviderEntries(ctx context.Context, jobID string, c *cont
 func (s *Service) infraProviderEntries(jobID string, owners []InfraOwner, caller Caller, checked map[string]bool) []postgres.AuditEntry {
 	now := time.Now().UTC()
 	hasRole := slices.Contains(caller.Roles, InfraProviderRole)
-	catalogues := map[string][]catalogue.CatalogueItem{}
+	catalogues := map[string][]catalogue.APDCatalogueItem{}
 	catalogueErrs := map[string]error{}
 
 	entries := []postgres.AuditEntry{}

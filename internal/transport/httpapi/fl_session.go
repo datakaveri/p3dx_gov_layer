@@ -20,8 +20,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/application/contractgen"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/domain/contract"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/repository/postgres"
 )
 
 // flOrchestratorUsername is the Keycloak user that operates FL sessions; a
@@ -450,12 +450,12 @@ func (s *Server) buildRosterContract(ctx context.Context, submissionID, ownerUse
 	if err != nil {
 		return "", nil, fmt.Errorf("load provider forms: %w", err)
 	}
-	parties := make([]postgres.ContractPartyInput, len(providers))
+	parties := make([]contractgen.FLParty, len(providers))
 	for i, p := range providers {
 		form := forms[p.Username]
 		name, _ := form["dataset_name"].(string)
 		url, _ := form["dataset_location_url"].(string)
-		parties[i] = postgres.ContractPartyInput{ID: p.ID, Username: p.Username, DatasetName: name, DataURL: url}
+		parties[i] = contractgen.FLParty{ID: p.ID, Username: p.Username, DatasetName: name, DataURL: url}
 	}
 	contractID, c, _, err := s.buildSessionContract(ctx, submissionID, ownerUserID, parties, true)
 	return contractID, c, err

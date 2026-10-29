@@ -8,7 +8,7 @@ import (
 )
 
 // UpsertProject records the project_id assigned to a contract (see
-// BuildContract, which mints a fresh project_id on every call) alongside who
+// contractgen.BuildFLRosterContract, which mints a fresh project_id on every call) alongside who
 // is participating: the output owner and the data-provider parties on that
 // specific contract. Called for every contract build (draft and final,
 // including "Start Again" restarts), so each contract shows up as its own

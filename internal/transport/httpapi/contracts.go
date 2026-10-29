@@ -8,8 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/s4r4v4n04/p3dx_gov_layer/internal/application/contractgen"
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/domain/contract"
-	"github.com/s4r4v4n04/p3dx_gov_layer/internal/repository/postgres"
 )
 
 // buildSessionContract assembles, stores and (when finalize) governance-signs
@@ -17,11 +17,16 @@ import (
 // contract, never reused; a new project_id every call), records the project,
 // and on finalize sends each data provider a sign request. An unknown
 // submission fails with pgx.ErrNoRows. Called by the /me/fl routes.
-func (s *Server) buildSessionContract(ctx context.Context, submissionID, outputOwnerUserID string, parties []postgres.ContractPartyInput, finalize bool) (string, *contract.Contract, int, error) {
-	c, err := s.db.BuildContract(ctx, submissionID, outputOwnerUserID, parties, finalize, "FL", s.cfg.KBSURL, s.cfg.FLContractValidity)
-	if err != nil {
-		return "", nil, 0, err
-	}
+func (s *Server) buildSessionContract(ctx context.Context, submissionID, outputOwnerUserID string, parties []contractgen.FLParty, finalize bool) (string, *contract.Contract, int, error) {
+	built := contractgen.BuildFLRosterContract(contractgen.FLRosterInput{
+		SessionID:       submissionID,
+		OwnerID:         outputOwnerUserID,
+		Parties:         parties,
+		PriorSignatures: s.db.DataProviderSignatures(ctx, submissionID),
+		Finalize:        finalize,
+		Validity:        s.cfg.FLContractValidity,
+	})
+	c := &built
 
 	if finalize {
 		if err := s.governanceSign(c); err != nil {

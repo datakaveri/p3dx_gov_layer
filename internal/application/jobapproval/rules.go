@@ -125,7 +125,7 @@ func ApprovalItem(dp contract.DataProviderParty) string {
 // AuditKey identifies one provider's item among a job's audit entries.
 func AuditKey(providerID, item string) string { return providerID + "\x00" + item }
 
-func catalogueHas(items []catalogue.CatalogueItem, item string) bool {
+func catalogueHas(items []catalogue.APDCatalogueItem, item string) bool {
 	for _, it := range items {
 		if it.ItemID == item || strings.EqualFold(it.Name, item) {
 			return true

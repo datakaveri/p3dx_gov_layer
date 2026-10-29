@@ -39,7 +39,7 @@ func newTestEnv(t *testing.T, c *contract.Contract, keys fakeKeys) testEnv {
 	}
 	env.svc = &Service{
 		Repo:                 env.repo,
-		Catalogue:            fakeCatalogue{infra: map[string][]catalogue.CatalogueItem{"provider-ivan": {{ItemID: "infra-1", Name: "Pune DC"}}}},
+		Catalogue:            fakeCatalogue{infra: map[string][]catalogue.APDCatalogueItem{"provider-ivan": {{ItemID: "infra-1", Name: "Pune DC"}}}},
 		APD:                  env.apd,
 		Keys:                 keys,
 		Signatures:           env.sigs,

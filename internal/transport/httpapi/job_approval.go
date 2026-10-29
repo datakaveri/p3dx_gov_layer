@@ -329,7 +329,7 @@ func (a approvalCatalogue) Item(ctx context.Context, itemID, token string) (cata
 	return a.s.lookupCatalogueItem(ctx, itemID, token)
 }
 
-func (approvalCatalogue) ProviderInfra(providerID string) ([]catalogue.CatalogueItem, error) {
+func (approvalCatalogue) ProviderInfra(providerID string) ([]catalogue.APDCatalogueItem, error) {
 	return catalogue.ListProviderInfra(providerID)
 }
 

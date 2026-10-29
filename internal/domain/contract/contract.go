@@ -20,7 +20,7 @@ import (
 // or cryptographic verification are attached to it (that remains a separate
 // concern; see the top-level signature verification already performed in
 // httpapi.handleContract). For the FL pathway, the drafting/output-owner
-// party is signed as soon as they submit a contract version (db.BuildContract),
+// party is signed as soon as they submit a contract version (contractgen.BuildFLRosterContract),
 // and each data-provider party is signed when they accept the participation
 // notification (db.SignDataProviderParty, called from
 // httpapi.respondToNotification).
@@ -121,6 +121,10 @@ type ApplicationProviderParty struct {
 // workload.KnownWorkloads): its image and CPU/memory request, as Kubernetes
 // quantities (e.g. "250m"/"512Mi").
 type Workload struct {
+	// ID is the catalogue workload (workload.KnownWorkloads id) that was
+	// selected. Older contracts carry it as application_providers[0].id
+	// instead; omitempty keeps their hashes stable.
+	ID        string            `json:"id,omitempty"`
 	Image     string            `json:"image"`
 	Resources WorkloadResources `json:"resources"`
 	// Env is passed to the workload container: DATASET_URL (the first
@@ -175,12 +179,12 @@ type InfraProviderParty struct {
 	Signature          Signature          `json:"signature"`
 }
 
-// Parties groups every party to the contract. DataProviders,
-// ApplicationProviders, and InfraProviders are always present as arrays
-// (possibly empty) rather than omitted, so every pathway (FL, TEE, SMPC)
-// produces the same shape. DataProviderCount/InfraProviderCount are plain
-// sibling counts (always len(DataProviders)/len(InfraProviders)) rather than
-// restructuring either array into an index-keyed object.
+// Parties groups every party to the contract. A contract only names the
+// parties its service uses (contractgen): ApplicationProviders and
+// InfraProviders are nil, and omitted from the JSON, when the service has
+// none. DataProviderCount/InfraProviderCount are plain sibling counts (always
+// len(DataProviders)/len(InfraProviders)); InfraProviderCount is written
+// only alongside InfraProviders.
 type Parties struct {
 	User                 UserParty                  `json:"user"`
 	DataProviders        []DataProviderParty        `json:"data_providers"`
@@ -188,6 +192,35 @@ type Parties struct {
 	ApplicationProviders []ApplicationProviderParty `json:"application_providers"`
 	InfraProviders       []InfraProviderParty       `json:"infra_providers"`
 	InfraProviderCount   int                        `json:"infra_provider_count"`
+}
+
+// partiesJSON is Parties' JSON shape, in the same field order. A nil slice is
+// omitted but an empty one is still written as [], so contracts stored before
+// the per-service shape (always [] / 0) re-marshal byte-for-byte and their
+// hashes still verify.
+type partiesJSON struct {
+	User                 UserParty                   `json:"user"`
+	DataProviders        []DataProviderParty         `json:"data_providers"`
+	DataProviderCount    int                         `json:"data_provider_count"`
+	ApplicationProviders *[]ApplicationProviderParty `json:"application_providers,omitempty"`
+	InfraProviders       *[]InfraProviderParty       `json:"infra_providers,omitempty"`
+	InfraProviderCount   *int                        `json:"infra_provider_count,omitempty"`
+}
+
+func (p Parties) MarshalJSON() ([]byte, error) {
+	out := partiesJSON{
+		User:              p.User,
+		DataProviders:     p.DataProviders,
+		DataProviderCount: p.DataProviderCount,
+	}
+	if p.ApplicationProviders != nil {
+		out.ApplicationProviders = &p.ApplicationProviders
+	}
+	if p.InfraProviders != nil {
+		out.InfraProviders = &p.InfraProviders
+		out.InfraProviderCount = &p.InfraProviderCount
+	}
+	return json.Marshal(out)
 }
 
 // Lifecycle is the contract's validity window.
@@ -254,7 +287,7 @@ type Contract struct {
 // ComputeHash returns "sha256:<hex>" over the contract's canonical JSON with
 // ContractHash itself, and every party's Signature block, blanked out first.
 // Blanking the signatures means the hash is computed once, before any party
-// signs, and stays stable as signatures accrue afterwards (BuildContract's
+// signs, and stays stable as signatures accrue afterwards (BuildFLRosterContract's
 // owner self-sign, then each provider's SignDataProviderParty on accept).
 func ComputeHash(c Contract) (string, error) {
 	c.ContractHash = ""
@@ -273,7 +306,7 @@ func ComputeHash(c Contract) (string, error) {
 // c is taken by value, but its slice fields still alias the caller's
 // underlying arrays, so each slice is re-allocated before its elements are
 // mutated — otherwise blanking signatures here would blank them for the
-// caller too.
+// caller too. A nil party list stays nil, so it stays out of the hashed JSON.
 func withoutSignatures(c Contract) Contract {
 	c.Parties.User.Signature = Signature{}
 
@@ -284,19 +317,23 @@ func withoutSignatures(c Contract) Contract {
 	}
 	c.Parties.DataProviders = dataProviders
 
-	appProviders := make([]ApplicationProviderParty, len(c.Parties.ApplicationProviders))
-	copy(appProviders, c.Parties.ApplicationProviders)
-	for i := range appProviders {
-		appProviders[i].Signature = Signature{}
+	if c.Parties.ApplicationProviders != nil {
+		appProviders := make([]ApplicationProviderParty, len(c.Parties.ApplicationProviders))
+		copy(appProviders, c.Parties.ApplicationProviders)
+		for i := range appProviders {
+			appProviders[i].Signature = Signature{}
+		}
+		c.Parties.ApplicationProviders = appProviders
 	}
-	c.Parties.ApplicationProviders = appProviders
 
-	infraProviders := make([]InfraProviderParty, len(c.Parties.InfraProviders))
-	copy(infraProviders, c.Parties.InfraProviders)
-	for i := range infraProviders {
-		infraProviders[i].Signature = Signature{}
+	if c.Parties.InfraProviders != nil {
+		infraProviders := make([]InfraProviderParty, len(c.Parties.InfraProviders))
+		copy(infraProviders, c.Parties.InfraProviders)
+		for i := range infraProviders {
+			infraProviders[i].Signature = Signature{}
+		}
+		c.Parties.InfraProviders = infraProviders
 	}
-	c.Parties.InfraProviders = infraProviders
 
 	return c
 }
@@ -331,9 +368,16 @@ func NewSubContract(c *Contract) (sub SubContract, missing []string) {
 	if c.Trustee == nil || c.Trustee.KBSURL == "" || c.Trustee.KeyResourcePath == "" {
 		missing = append(missing, "trustee")
 	}
+	// The coordinator's Workload message has no id field.
+	wl := c.Workload
+	if wl != nil && wl.ID != "" {
+		w := *wl
+		w.ID = ""
+		wl = &w
+	}
 	sub.Contract = SubContractBody{
 		ContractID:  c.ContractID,
-		Workload:    c.Workload,
+		Workload:    wl,
 		Trustee:     c.Trustee,
 		CallbackURL: c.CallbackURL,
 	}

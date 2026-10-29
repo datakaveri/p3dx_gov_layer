@@ -17,9 +17,12 @@ var fetchDatasetPolicy = func(datasetID string) (map[string]interface{}, error) 
 }
 
 // contractWorkloadID is the catalogue workload (workload.KnownWorkloads id) a
-// TEE contract runs — BuildGeneratedContract records it as the application
-// provider.
+// TEE contract runs: workload.id, or on older contracts the application
+// provider's id.
 func contractWorkloadID(c *contract.Contract) string {
+	if c.Workload != nil && c.Workload.ID != "" {
+		return c.Workload.ID
+	}
 	if len(c.Parties.ApplicationProviders) == 0 {
 		return ""
 	}

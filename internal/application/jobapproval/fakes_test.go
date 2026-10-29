@@ -106,7 +106,7 @@ func (r *fakeRepo) SetJobStatus(context.Context, string, string) error { return 
 // fakeCatalogue answers DX lookups only for alice's token, the way the DX
 // catalogue refuses a bad token.
 type fakeCatalogue struct {
-	infra map[string][]catalogue.CatalogueItem // provider id -> their APD infras
+	infra map[string][]catalogue.APDCatalogueItem // provider id -> their APD infras
 }
 
 func (fakeCatalogue) Item(_ context.Context, itemID, token string) (catalogue.DXCatalogueItem, error) {
@@ -122,7 +122,7 @@ func (fakeCatalogue) Item(_ context.Context, itemID, token string) (catalogue.DX
 	return catalogue.DXCatalogueItem{}, catalogue.ErrCatalogueItemNotFound
 }
 
-func (f fakeCatalogue) ProviderInfra(providerID string) ([]catalogue.CatalogueItem, error) {
+func (f fakeCatalogue) ProviderInfra(providerID string) ([]catalogue.APDCatalogueItem, error) {
 	return f.infra[providerID], nil
 }
 

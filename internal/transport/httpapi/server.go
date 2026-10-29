@@ -66,6 +66,9 @@ type Server struct {
 	vmCreds vmCredentialStore
 	vmKC    vmKeycloak
 	vmRate  *rateLimiter
+	// dbPing backs GET /ready (health.go): *postgres.DB in production; nil
+	// in tests that run without a database.
+	dbPing pinger
 }
 
 // New builds the Server.
@@ -89,15 +92,20 @@ func New(cfg *config.Config, database *postgres.DB, kc *keycloak.Client, govKey 
 		vmRate:       newRateLimiter(vmTokenRequestsPerMinute),
 	}
 	s.vmKC = s.users
+	if database != nil {
+		s.dbPing = database
+	}
 	// Pick up TEE runs whose outcome wasn't recorded before a restart.
 	go s.resumeTEERunWatchers()
 	go s.runVMSessionSweeper()
 	return s
 }
 
-// Handler returns the root http.Handler with CORS + the routes mounted at both
-// /api/v1 and /governance.
+// Handler returns the root http.Handler: the Kubernetes probes (/health,
+// /ready) and, behind CORS, the routes mounted at both /api/v1 and /governance.
 func (s *Server) Handler() http.Handler {
+	top := chi.NewRouter()
+	s.registerHealthRoutes(top)
 	root := chi.NewRouter()
 	root.Use(s.corsMiddleware)
 	root.Route("/api/v1", s.registerRoutes)
@@ -111,7 +119,8 @@ func (s *Server) Handler() http.Handler {
 	// FL client-VM token refresh + orchestrator delivery callback, at the
 	// /p3dx paths the VMs and orchestrator already call (fl_vm_credentials.go).
 	s.registerVMCredentialRoutes(root)
-	return root
+	top.Mount("/", root)
+	return top
 }
 
 // registerRoutes wires every endpoint onto the given sub-router. Static segments

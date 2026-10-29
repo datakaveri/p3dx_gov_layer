@@ -170,19 +170,20 @@ func (s *Server) editContract(w http.ResponseWriter, r *http.Request) {
 				fail(http.StatusBadRequest, "UNKNOWN_WORKLOAD", "no workload "+id+" in the catalogue — send workload.image with it")
 				return
 			}
-			prev := ""
-			if len(c.Parties.ApplicationProviders) > 0 {
-				prev = c.Parties.ApplicationProviders[0].ID
-			}
+			prev := contractWorkloadID(c)
 			if id != prev {
 				changes = append(changes, fmt.Sprintf("workload %q -> %q", prev, id))
 				if ok {
 					c.Workload.Image = known.Image
 					c.Workload.Resources = known.Resources
 				}
+				// Older contracts name the workload as their application
+				// provider; newer ones on the workload itself.
 				if len(c.Parties.ApplicationProviders) > 0 {
 					ap := &c.Parties.ApplicationProviders[0]
 					ap.ID, ap.AppName, ap.ContainerImage = id, id, c.Workload.Image
+				} else {
+					c.Workload.ID = id
 				}
 			}
 		}

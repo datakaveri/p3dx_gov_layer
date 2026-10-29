@@ -51,3 +51,43 @@ func TestTrusteeInHash(t *testing.T) {
 		t.Fatal("changing key_resource_path did not change the contract hash")
 	}
 }
+
+func TestPartiesOmitUnusedLists(t *testing.T) {
+	// A service with no infra/application parties leaves them out.
+	raw, _ := json.Marshal(Parties{DataProviders: []DataProviderParty{}})
+	for _, key := range []string{"application_providers", "infra_providers", "infra_provider_count"} {
+		if strings.Contains(string(raw), key) {
+			t.Fatalf("nil list serialised %s: %s", key, raw)
+		}
+	}
+
+	// Contracts stored before that wrote [] / 0; they must re-marshal (and so
+	// hash) exactly as stored.
+	stored := `{"user":{"id":"","name":"","datablob_url":"","signature":{"signed_at":null}},"data_providers":[],"data_provider_count":0,"application_providers":[],"infra_providers":[],"infra_provider_count":0}`
+	var p Parties
+	if err := json.Unmarshal([]byte(stored), &p); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := json.Marshal(p)
+	if string(again) != stored {
+		t.Fatalf("stored parties re-marshalled as\n%s\nwant\n%s", again, stored)
+	}
+}
+
+func TestSubContractOmitsWorkloadID(t *testing.T) {
+	c := Contract{
+		ContractID: "c1",
+		Workload:   &Workload{ID: "credits-evaluation", Image: "img", Env: map[string]string{"DATASET_URL": "u"}},
+		Trustee:    &JobTrustee{KBSURL: "http://kbs", KeyResourcePath: "default/k/1"},
+	}
+	sub, missing := NewSubContract(&c)
+	if len(missing) > 0 {
+		t.Fatalf("missing = %v", missing)
+	}
+	if sub.Contract.Workload.ID != "" {
+		t.Fatalf("sub-contract workload id = %q, want none (CreateJob has no such field)", sub.Contract.Workload.ID)
+	}
+	if c.Workload.ID != "credits-evaluation" {
+		t.Fatal("NewSubContract changed the contract's own workload")
+	}
+}

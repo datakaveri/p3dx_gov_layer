@@ -211,16 +211,16 @@ func (s *Server) handleGenerateContract(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// InfraCat: resolve each selected infrastructure's APD policy into the
-	// contract's InfraProviderParty fields. TEE (optional) and SMPC, and never gates the
-	// preview — same graceful-degradation style as the dataset policy fetch
-	// above (BuildGeneratedContract falls back to "Unknown Infrastructure" if
-	// a lookup or shape doesn't resolve a name). The 5 confidential-compute
-	// flags are read directly as booleans — InfraPolicyForm.jsx computes and
-	// stores them at registration time (OR'd across that infra's own node
-	// pools/VM instance), so no tech-string classification happens here.
+	// InfraCat (SMPC only): resolve each selected infrastructure's APD policy
+	// into the contract's InfraProviderParty fields. Never gates the preview —
+	// same graceful-degradation style as the dataset policy fetch above (an
+	// unresolved name becomes "Unknown Infrastructure"). The 5
+	// confidential-compute flags are read directly as booleans —
+	// InfraPolicyForm.jsx computes and stores them at registration time (OR'd
+	// across that infra's own node pools/VM instance), so no tech-string
+	// classification happens here.
 	var infraInputs []contractgen.InfraInput
-	if req.Technique == "TEE" || req.Technique == "SMPC" {
+	if req.Technique == "SMPC" {
 		for _, infraID := range req.InfraIDs {
 			in := contractgen.InfraInput{InfraID: infraID}
 			infraPolicy, err := apd.FetchInfraPolicy(infraID)

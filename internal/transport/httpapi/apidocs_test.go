@@ -37,7 +37,21 @@ func TestAPIDocsRoutes(t *testing.T) {
 	}
 }
 
-// The spec documents exactly the routes registerRoutes mounts, under /api/v1.
+// undocumentedRoutes are mounted but commented out of the published spec: their
+// only callers are p3dx-fl-orchestrator and participant-VM provisioning, which
+// are not deployed on dev yet.
+var undocumentedRoutes = map[string]bool{
+	"GET /projects":                   true,
+	"GET /projects/{sessionId}":       true,
+	"POST /gateway-certs":             true,
+	"POST /fl-output/{submissionId}":  true,
+	"POST /vm-registry":               true,
+	"GET /vm-registry/output-owner":   true,
+	"GET /vm-registry/data-providers": true,
+}
+
+// The spec documents exactly the routes registerRoutes mounts, under /api/v1,
+// except undocumentedRoutes.
 func TestAPIDocsSpecCoversRoutes(t *testing.T) {
 	spec, err := apiDocsFS.ReadFile("apidocs/openapi.yaml")
 	if err != nil {
@@ -49,6 +63,9 @@ func TestAPIDocsSpecCoversRoutes(t *testing.T) {
 	_ = chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		n++
 		path := strings.TrimSuffix(route, "/")
+		if undocumentedRoutes[method+" "+path] {
+			return nil
+		}
 		if !strings.Contains(string(spec), "\n  /api/v1"+path+":\n") {
 			t.Errorf("spec has no path /api/v1%s", path)
 		} else if !specHasMethod(string(spec), "/api/v1"+path, strings.ToLower(method)) {

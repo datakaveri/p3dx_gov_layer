@@ -71,6 +71,9 @@ func Initialize(ctx context.Context, cfg *config.Config) (*DB, error) {
 // Close releases the pool.
 func (d *DB) Close() { d.Pool.Close() }
 
+// Ping checks that Postgres answers; GET /ready uses it.
+func (d *DB) Ping(ctx context.Context) error { return d.Pool.Ping(ctx) }
+
 // ensureDatabase connects to the default "postgres" database and creates the
 // target database if it does not exist yet.
 func ensureDatabase(ctx context.Context, cfg *config.Config) error {

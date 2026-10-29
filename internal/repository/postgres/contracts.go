@@ -13,22 +13,6 @@ import (
 	"github.com/s4r4v4n04/p3dx_gov_layer/internal/domain/contract"
 )
 
-// The contract is emitted in the canonical contract.Contract shape (see
-// internal/domain/contract). Fields the FL flow does not capture are left blank
-// (empty string / zero / empty slice) rather than omitted, so the shape is
-// always complete.
-
-// ContractPartyInput is one provider passed in from the caller: the Keycloak id
-// and username, plus that provider's dataset info pulled from their APD
-// provider-form (dataset_name / dataset_location_url), keyed by data_owner_id
-// == username. Left blank when the caller has no form data for this provider.
-type ContractPartyInput struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	DatasetName string `json:"dataset_name"`
-	DataURL     string `json:"data_url"`
-}
-
 // NewUUID returns a random RFC 4122 version-4 UUID string. Used for contract_id
 // (avoids pulling in an external uuid dependency).
 func NewUUID() string {
@@ -45,14 +29,20 @@ func NewJobID() string {
 	return newID("job", 9)
 }
 
-// existingDataProviderSignatures returns username -> signed_at for every
+// NewProjectID returns a fresh project id ("proj-<unixMillis>-<rand9>"). Every
+// FL roster contract is its own project.
+func NewProjectID() string {
+	return newID("proj", 9)
+}
+
+// DataProviderSignatures returns username -> signed_at for every
 // already-signed data-provider party on this session's currently stored
 // contract. A provider signs by accepting their participation notification
 // (see SignDataProviderParty), which happens against the draft (finalize=false)
-// contract; carrying that signature forward here means it survives the
-// draft -> final-roster rebuild in BuildContract instead of resetting to
+// contract; passing these to contractgen.BuildFLRosterContract means the
+// signature survives the draft -> final-roster rebuild instead of resetting to
 // unsigned.
-func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID string) map[string]*time.Time {
+func (d *DB) DataProviderSignatures(ctx context.Context, sessionID string) map[string]*time.Time {
 	raw, err := d.GetContractBySession(ctx, sessionID)
 	if err != nil || raw == nil {
 		return nil
@@ -70,99 +60,8 @@ func (d *DB) existingDataProviderSignatures(ctx context.Context, sessionID strin
 	return signed
 }
 
-// BuildContract assembles a contract for the given submission session ID and parties.
-// Since forms are now stored in APD only, dataset fields from provider forms are
-// left blank. Every call mints a brand-new project_id and contract_id - a
-// contract is never reused across calls, so the initial (finalize=false) and
-// final-roster (finalize=true) contracts for one session are always two
-// distinct projects, and a "Start Again" restart is just another such call.
-// finalize sets version=2 (the final roster contract) vs. version=1 (the draft).
-// pathway indicates whether this is an FL contract (with forms flow) or GENERAL (with policy checks).
-// Prior data-provider signatures are still carried forward from the session's
-// most recent contract, since a restart reuses the same accepted roster
-// without redoing invite/accept.
-// validity sets Lifecycle.ValidUntil (now + validity); FL_CONTRACT_VALIDITY.
-func (d *DB) BuildContract(ctx context.Context, submissionID, ownerUserID string, parties []ContractPartyInput, finalize bool, pathway, kbsURL string, validity time.Duration) (*contract.Contract, error) {
-	if pathway == "" {
-		pathway = "FL"
-	}
-
-	priorSignatures := d.existingDataProviderSignatures(ctx, submissionID)
-	dataProviders := make([]contract.DataProviderParty, 0, len(parties))
-	for _, p := range parties {
-		dp := contract.DataProviderParty{
-			ID:          p.ID,
-			Name:        p.Username,
-			DatasetName: p.DatasetName,
-			DataURL:     p.DataURL,
-			Constraints: contract.Constraints{RestrictedTo: []string{}},
-			Trustee:     contract.NewTrustee(kbsURL, p.DatasetName, ""),
-		}
-		if signedAt, ok := priorSignatures[p.Username]; ok {
-			dp.Signature.SignedAt = signedAt
-		}
-		dataProviders = append(dataProviders, dp)
-	}
-
-	// The drafting party (the output owner). Use ownerUserID if provided,
-	// otherwise fall back to the submission id.
-	if ownerUserID == "" {
-		ownerUserID = submissionID
-	}
-
-	projectID := newID("proj", 9)
-	contractID := NewUUID()
-	version := 1
-	if finalize {
-		version = 2
-	}
-
-	now := time.Now().UTC()
-	if validity <= 0 {
-		validity = 90 * 24 * time.Hour
-	}
-
-	c := &contract.Contract{
-		ProjectID:  projectID,
-		ContractID: contractID,
-		JobID:      NewJobID(),
-		Version:    version,
-		Lifecycle: contract.Lifecycle{
-			CreatedAt:  now,
-			ValidFrom:  now,
-			ValidUntil: now.Add(validity),
-		},
-		Technique:     "FL",
-		ComputeChoice: "FEDERATED_LEARNING",
-		Parties: contract.Parties{
-			User: contract.UserParty{
-				ID:        ownerUserID,
-				Name:      ownerUserID,
-				Signature: contract.Signature{SignedAt: &now},
-			},
-			DataProviders:        dataProviders,
-			DataProviderCount:    len(dataProviders),
-			ApplicationProviders: []contract.ApplicationProviderParty{},
-			InfraProviders:       []contract.InfraProviderParty{},
-			InfraProviderCount:   0,
-		},
-		SessionInfo: contract.SessionInfo{
-			ID:        submissionID,
-			SessionID: submissionID,
-		},
-	}
-
-	hash, err := contract.ComputeHash(*c)
-	if err != nil {
-		return nil, err
-	}
-	c.ContractHash = hash
-
-	return c, nil
-}
-
 // StoreContract upserts a contract keyed by project_id (one contract per
-// project; every BuildContract call mints a fresh project_id, so a session
+// project; every FL roster contract mints a fresh project_id, so a session
 // accumulates a new project per contract build - draft, final, and any
 // "Start Again" restart each get their own row).
 // finalized marks the final roster contract vs. the initial participation-request
@@ -240,8 +139,8 @@ func (d *DB) StoreGeneratedContract(ctx context.Context, consumerID, datasetID, 
 // participation-response flow carries — see httpapi.respondToNotification).
 // It's a no-op, returning (false, nil), when there's no stored contract yet, no
 // party with that username, or that party already signed. finalize (a later
-// BuildContract call rebuilding the contract for this session) carries the
-// signature forward via existingDataProviderSignatures, so it survives the
+// roster rebuild for this session) carries the signature forward via
+// DataProviderSignatures, so it survives the
 // draft -> final-roster transition.
 
 // checks that the contarct is signed by the data providers and if they have signed or not ust updates
@@ -360,7 +259,7 @@ func (d *DB) GetContractBySession(ctx context.Context, sessionID string) (json.R
 // project, or (nil, nil) when none exists. Unlike GetContractBySession
 // (which only ever returns a session's latest contract), this fetches the
 // exact contract for a given project_id - needed since a session now
-// accumulates several projects (see BuildContract, which mints a fresh
+// accumulates several projects (see contractgen.BuildFLRosterContract, which mints a fresh
 // project_id on every call) and the UI lets a user view any one of them.
 func (d *DB) GetContractByProjectID(ctx context.Context, projectID string) (json.RawMessage, error) {
 	var raw json.RawMessage
