@@ -2027,12 +2027,27 @@ paths:
         - My Account
       summary: Get My Contract Sign Requests
       description: |
-        Returns the `CONTRACT_SIGN` requests addressed to the calling data provider (`provider-<username>`).
+        Returns the contracts waiting for the calling data provider's signature: the `CONTRACT_SIGN` requests
+        addressed to their provider ID (`provider-<username>`), newest first. A contract appears once. When it
+        changes (for example a consent expiry is set), its earlier request is superseded and only the new one is
+        listed. The contract ID is in `payload.contract_id`.
         Requires the `provider` role.
       operationId: get-my-sign-requests
       responses:
         '200':
-          description: OK. `{status, requests}`
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
         '401':
           $ref: '#/components/responses/ProviderTokenUnauthorized'
         '403':
@@ -2054,11 +2069,30 @@ paths:
         - My Account
       summary: Get My Jobs
       description: |
-        Returns every job the caller takes part in, as consumer, data provider or infrastructure provider, newest first.
+        Lists the TEE and SMPC contracts the caller takes part in, newest first. Each job is one contract. The
+        caller may be its consumer, a data provider or an infrastructure provider, and `participation` holds the
+        caller's own part in it. A data provider sees a contract as soon as they are asked to approve or sign it,
+        before they have registered a public key.
+
+        The contracts a data provider still has to act on are the jobs with a `participation` entry whose `role` is
+        `data-provider` and whose `status` is `requested`. The response is not filtered, so the client picks these
+        out. The ones waiting only for the provider's signature are also listed by
+        [Get My Contract Sign Requests](#operation/get-my-sign-requests).
+
+        FL contracts are not listed here. The consumer finds them with [Get My Projects](#operation/get-my-projects).
+        No endpoint lists the FL projects a data provider has been asked to join: they receive each request as a
+        notification ([Get My Notifications](#operation/get-my-notifications)).
+
+        To read a listed contract, a consumer calls [Get Contract](#operation/get-contract) and a provider calls
+        [Get Job Contract](#operation/get-job-contract).
       operationId: get-my-jobs
       responses:
         '200':
-          description: OK. `{status, user_id, count, jobs}`
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MyJobs'
         '401':
           $ref: '#/components/responses/ProviderTokenUnauthorized'
         '500':
@@ -2078,11 +2112,25 @@ paths:
         - My Account
       summary: Get My Projects
       description: |
-        Returns the caller's FL projects. A user holding the `fl-orchestrator` role sees every project.
+        Returns the FL projects whose output the caller owns, newest first. A user holding the `fl-orchestrator`
+        role sees every project. Data providers taking part in a project are not matched: they are told about it
+        through [Get My Notifications](#operation/get-my-notifications).
       operationId: get-my-projects
       responses:
         '200':
-          description: OK. `{status, projects}`
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: SUCCESS
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
         '401':
           $ref: '#/components/responses/ProviderTokenUnauthorized'
         '500':
@@ -3813,6 +3861,123 @@ components:
           type: array
           items:
             type: string
+    MyJobs:
+      type: object
+      properties:
+        status:
+          type: string
+          example: SUCCESS
+        user_id:
+          type: string
+          description: The caller's Keycloak `sub`
+        count:
+          type: integer
+          example: 1
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserJob'
+    UserJob:
+      type: object
+      description: One contract the caller takes part in
+      properties:
+        job_id:
+          type: string
+        contract_id:
+          type: string
+        technique:
+          type: string
+          enum: [TEE, SMPC]
+        job_state:
+          type: string
+          enum: [in_progress, final, tee_enabled]
+          description: |
+            `in_progress` until the consumer finalises the contract, then `final`, then `tee_enabled` once a TEE
+            run is enabled.
+        created_at:
+          type: string
+          format: date-time
+        finalized_at:
+          type: string
+          format: date-time
+          nullable: true
+        tee_enabled_at:
+          type: string
+          format: date-time
+          nullable: true
+        consumer:
+          type: string
+          description: Who generated the contract (the actor of its `generated` event); empty if unknown
+        participation:
+          type: array
+          description: The caller's parts in this job. A provider has one entry per dataset or infrastructure item.
+          items:
+            $ref: '#/components/schemas/JobParticipation'
+        events:
+          type: array
+          description: What happened to the contract, oldest first
+          items:
+            $ref: '#/components/schemas/ContractEvent'
+        last_event:
+          allOf:
+            - $ref: '#/components/schemas/ContractEvent'
+          nullable: true
+    JobParticipation:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [consumer, data-provider, infra-provider]
+        participant_id:
+          type: string
+          description: The consumer's user ID, or the provider's ID (`provider-<username>`)
+        user_id:
+          type: string
+          description: Keycloak `sub`; empty for a provider until they approve or sign
+        username:
+          type: string
+        item_id:
+          type: string
+          description: The dataset or infrastructure ID; absent for the consumer
+        item_name:
+          type: string
+        status:
+          type: string
+          enum: [created, requested, approved, rejected, signed, final, tee_enabled, withdrawn]
+          description: |
+            `created` for the consumer. A provider starts at `requested`, then `approved` or `rejected`, then
+            `signed`. `withdrawn` means a data provider withdrew consent after signing.
+        updated_at:
+          type: string
+          format: date-time
+    ContractEvent:
+      type: object
+      properties:
+        contract_id:
+          type: string
+        job_id:
+          type: string
+        event:
+          type: string
+          enum:
+            - generated
+            - sign_requested
+            - signed
+            - edited
+            - consent_expiry_set
+            - run_started
+            - run_refused
+            - run_failed
+            - run_succeeded
+            - run_execution_failed
+        detail:
+          type: string
+        actor:
+          type: string
+          description: Who caused the event
+        at:
+          type: string
+          format: date-time
     Signature:
       type: object
       properties:
@@ -4148,66 +4313,6 @@ components:
         created_at:
           type: string
           format: date-time
-    UserJob:
-      type: object
-      properties:
-        job_id:
-          type: string
-        contract_id:
-          type: string
-        technique:
-          type: string
-        job_state:
-          type: string
-          enum:
-            - in_progress
-            - final
-            - tee_enabled
-        created_at:
-          type: string
-          format: date-time
-        finalized_at:
-          type: string
-          format: date-time
-          nullable: true
-        tee_enabled_at:
-          type: string
-          format: date-time
-          nullable: true
-        participation:
-          type: array
-          items:
-            type: object
-            properties:
-              role:
-                type: string
-                enum:
-                  - consumer
-                  - data-provider
-                  - infra-provider
-              participant_id:
-                type: string
-              user_id:
-                type: string
-              username:
-                type: string
-              item_id:
-                type: string
-              item_name:
-                type: string
-              status:
-                type: string
-                enum:
-                  - created
-                  - requested
-                  - approved
-                  - rejected
-                  - signed
-                  - final
-                  - tee_enabled
-              updated_at:
-                type: string
-                format: date-time
     VMRegistryEntry:
       type: object
       properties:
